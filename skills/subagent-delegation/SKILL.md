@@ -19,6 +19,7 @@ Use only these commands for normal delegation:
 ```bash
 devspace agents ls
 devspace agents run <profile-or-provider-or-id> "<prompt>"
+devspace agents wait <id> [--timeout <seconds>]
 devspace agents show <id>
 ```
 
@@ -31,11 +32,18 @@ DevSpace agent id.
 `run <provider> "<prompt>"` starts a raw built-in provider when no configured
 profile is needed. Built-in providers are listed by `open_workspace`.
 
-`run <id> "<prompt>"` sends a follow-up to an existing agent.
+`run <id> "<prompt>"` sends a follow-up to an existing agent. Follow-ups
+continue the same provider conversation; they do not start over.
 
-`show <id>` prints status and the latest response. If the agent is still
-running, `show` waits briefly. If there is still no final response, call `show`
-again later.
+`wait <id>` blocks until the agent finishes, errors, or stops, then prints the
+final response once. Use it right after `run` instead of polling `show`. The
+default timeout is 300 seconds (override with `--timeout <seconds>` or
+`DEVSPACE_AGENTS_WAIT_TIMEOUT`). A timeout never stops the worker — call
+`wait` again to keep waiting.
+
+`show <id>` prints status and the latest response for quick checks and manual
+debugging. If the agent is still running, `show` waits briefly; prefer `wait`
+when you actually want the result.
 
 Do not run provider CLIs such as `codex`, `claude`, `opencode`, `pi`,
 `cursor-agent`, or `copilot` directly unless you are explicitly debugging

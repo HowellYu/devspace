@@ -312,6 +312,7 @@ function printHelp(): void {
       "  devspace agents ls       List subagent sessions",
       "  devspace agents run <profile-or-provider-or-id> [--model <model>] <prompt>",
       "  devspace agents show <id>",
+      "  devspace agents wait <id> [--timeout <seconds>]",
       "  devspace -v, --version   Print the installed version",
       "",
       "For temporary tunnels:",
@@ -332,6 +333,9 @@ async function runAgentsCommand(args: string[]): Promise<void> {
       return;
     case "show":
       await runAgentsShow(rest);
+      return;
+    case "wait":
+      await runAgentsWait(rest);
       return;
     case "__worker":
       await runAgentsWorker(rest);
@@ -445,8 +449,89 @@ async function runAgentsShow(args: string[]): Promise<void> {
   }
 }
 
-async function runAgentsWorker(args: string[]): Promise<void> {
-  const [id, promptFileFlag, promptFile] = args;
+const AGENTS_WAIT_TERMINAL_STATUSES: ReadonlySet<LocalAgentRecord["status"]> = new Set([
+  "idle",
+  "error",
+  "stopped",
+]);
+const AGENTS_WAIT_DEFAULT_TIMEOUT_SECONDS = 300;
+const AGENTS_WAIT_MAX_TIMEOUT_SECONDS = 3600;
+const AGENTS_WAIT_POLL_MS = 750;
+
+function parseAgentsWaitTimeoutSeconds(
+  raw: string | undefined,
+  env: NodeJS.ProcessEnv = process.env,
+): number {
+  const source = raw ?? env.DEVSPACE_AGENTS_WAIT_TIMEOUT;
+  if (source === undefined) return AGENTS_WAIT_DEFAULT_TIMEOUT_SECONDS;
+  const trimmed = source.trim();
+  if (!/^\d+$/.test(trimmed)) {
+    throw new Error(
+      `Invalid agents wait timeout: ${source}. Expected a positive integer number of seconds.`,
+    );
+  }
+  const seconds = Number.parseInt(trimmed, 10);
+  if (seconds < 1 || seconds > AGENTS_WAIT_MAX_TIMEOUT_SECONDS) {
+    throw new Error(
+      `Invalid agents wait timeout: ${source}. Expected between 1 and ${AGENTS_WAIT_MAX_TIMEOUT_SECONDS} seconds.`,
+    );
+  }
+  return seconds;
+}
+
+function parseAgentsWaitArgs(args: string[]): { id: string; timeoutRaw?: string } {
+  const [id, ...rest] = args;
+  if (!id) throw new Error("Usage: devspace agents wait <id> [--timeout <seconds>]");
+
+  let timeoutRaw: string | undefined;
+  for (let index = 0; index < rest.length; index += 1) {
+    const flag = rest[index];
+    if (flag === "--timeout") {
+      timeoutRaw = rest[index + 1];
+      if (timeoutRaw === undefined) {
+        throw new Error("Missing value for --timeout. Expected seconds.");
+      }
+      index += 1;
+      continue;
+    }
+    throw new Error(`Unknown agents wait argument: ${flag}`);
+  }
+  return { id, timeoutRaw };
+}
+
+async function runAgentsWait(args: string[]): Promise<void> {
+  const { id, timeoutRaw } = parseAgentsWaitArgs(args);
+  const timeoutSeconds = parseAgentsWaitTimeoutSeconds(timeoutRaw);
+
+  const config = loadConfig();
+  const store = createLocalAgentStore(config);
+  let record = store.get(id);
+  if (!record) throw new Error(`Unknown subagent id: ${id}`);
+
+  const deadline = Date.now() + timeoutSeconds * 1000;
+  while (!AGENTS_WAIT_TERMINAL_STATUSES.has(record.status) && Date.now() < deadline) {
+    await sleep(AGENTS_WAIT_POLL_MS);
+    record = store.get(id) ?? record;
+  }
+
+  console.log(formatAgentLine(record));
+  if (record.latestResponse) {
+    console.log(record.latestResponse);
+    return;
+  }
+  if (record.error) {
+    console.log(record.error);
+    return;
+  }
+  if (!AGENTS_WAIT_TERMINAL_STATUSES.has(record.status)) {
+    console.log(
+      `Still ${record.status} after ${timeoutSeconds}s. The worker was not stopped; ` +
+        `call \`devspace agents wait ${record.id}\` again, or \`devspace agents show ${record.id}\` for a quick status check.`,
+    );
+  }
+}
+
+async function runAgentsWorker(args: string[]): Promise<void> {  const [id, promptFileFlag, promptFile] = args;
   if (!id || promptFileFlag !== "--prompt-file" || !promptFile) {
     throw new Error("Usage: devspace agents __worker <id> --prompt-file <path>");
   }
@@ -570,6 +655,7 @@ function printAgentsHelp(): void {
       "  devspace agents ls",
       "  devspace agents run <profile-or-provider-or-id> [--model <model>] [--thinking <level>] <prompt>",
       "  devspace agents show <id>",
+      "  devspace agents wait <id> [--timeout <seconds>]",
     ].join("\n"),
   );
 }
