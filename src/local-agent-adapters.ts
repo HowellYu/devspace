@@ -2,6 +2,7 @@ import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from "node:chil
 import { resolve } from "node:path";
 import { Readable, Writable } from "node:stream";
 import type { EffortLevel } from "@anthropic-ai/claude-agent-sdk";
+import type { ActiveSession, ClientContext } from "@agentclientprotocol/sdk";
 import type { LocalAgentProvider } from "./local-agent-profiles.js";
 import { removeDevspaceNodeModulesBinFromPath } from "./local-agent-path.js";
 import {
@@ -15,11 +16,21 @@ export interface LocalAgentAdapter {
   run(input: LocalAgentRunInput): Promise<LocalAgentRunResult>;
 }
 
-const ACP_COMMANDS: Record<"cursor" | "copilot", [string, ...string[]]> = {
-  cursor: ["cursor-agent", "acp"],
-  copilot: ["copilot", "--acp"],
-};
+export type AcpLocalAgentProvider = "cursor" | "copilot";
+
 const PI_AGENT_TIMEOUT_MS = 120_000;
+
+export function acpCommandFor(
+  provider: AcpLocalAgentProvider,
+  env: NodeJS.ProcessEnv = process.env,
+): [string, ...string[]] {
+  switch (provider) {
+    case "cursor":
+      return [env.CURSOR_COMMAND ?? "cursor-agent", "acp"];
+    case "copilot":
+      return [env.COPILOT_COMMAND ?? "copilot", "--acp"];
+  }
+}
 
 export async function runLocalAgentProvider(
   provider: LocalAgentProvider,
@@ -40,7 +51,7 @@ export function createLocalAgentAdapter(provider: LocalAgentProvider): LocalAgen
       return new PiRpcLocalAgentAdapter();
     case "cursor":
     case "copilot":
-      return new AcpLocalAgentAdapter(provider, ACP_COMMANDS[provider]);
+      return new AcpLocalAgentAdapter(provider);
   }
 }
 
@@ -166,16 +177,13 @@ class OpencodeLocalAgentAdapter implements LocalAgentAdapter {
 }
 
 class AcpLocalAgentAdapter implements LocalAgentAdapter {
-  constructor(
-    readonly provider: "cursor" | "copilot",
-    private readonly command: [string, ...string[]],
-  ) {}
+  constructor(readonly provider: AcpLocalAgentProvider) {}
 
   async run(input: LocalAgentRunInput): Promise<LocalAgentRunResult> {
     const { client } = await import("@agentclientprotocol/sdk");
     const { methods } = await import("@agentclientprotocol/sdk");
     const { ndJsonStream } = await import("@agentclientprotocol/sdk");
-    const [command, ...args] = this.command;
+    const [command, ...args] = acpCommandFor(this.provider);
     const child = spawn(command, args, {
       cwd: input.workspace,
       env: process.env,
@@ -187,6 +195,15 @@ class AcpLocalAgentAdapter implements LocalAgentAdapter {
     child.stderr.on("data", (chunk: Buffer) => {
       stderr += chunk.toString("utf8");
     });
+    // A missing or non-executable provider binary surfaces as an asynchronous
+    // ChildProcess 'error' event. Turn it into a normal run failure instead of
+    // an unhandled event that would crash the CLI worker process.
+    const childStartupError = new Promise<never>((_resolve, reject) => {
+      child.once("error", (error: Error) => {
+        reject(new Error(`${command} failed to start: ${error.message}`));
+      });
+    });
+    childStartupError.catch(() => {});
 
     const stream = ndJsonStream(
       Writable.toWeb(child.stdin) as WritableStream<Uint8Array>,
@@ -194,7 +211,8 @@ class AcpLocalAgentAdapter implements LocalAgentAdapter {
     );
     try {
       let providerSessionId = input.providerSessionId ?? null;
-      const finalResponse = await client({ name: "DevSpace" })
+      const finalResponse = await Promise.race([
+        client({ name: "DevSpace" })
         .onRequest(methods.client.session.requestPermission, (context) => {
           const selected = selectAcpAllowPermissionOption(context.params.options);
           return selected
@@ -202,7 +220,9 @@ class AcpLocalAgentAdapter implements LocalAgentAdapter {
             : { outcome: { outcome: "cancelled" } };
         })
         .connectWith(stream, async (context) => {
-          const session = await context.buildSession(input.workspace).start();
+          const session = input.providerSessionId
+            ? await loadExistingAcpSession(context, this.provider, input.workspace, input.providerSessionId)
+            : await context.buildSession(input.workspace).start();
           providerSessionId = session.sessionId;
           try {
             if (input.model) {
@@ -230,7 +250,9 @@ class AcpLocalAgentAdapter implements LocalAgentAdapter {
           } finally {
             session.dispose();
           }
-        });
+        }),
+        childStartupError,
+      ]);
       return {
         provider: this.provider,
         providerSessionId,
@@ -243,6 +265,43 @@ class AcpLocalAgentAdapter implements LocalAgentAdapter {
       child.kill();
     }
   }
+}
+
+/**
+ * Resumes an existing ACP conversation through `session/load` and attaches the
+ * SDK's update routing to the loaded session.
+ *
+ * A failed load must never fall back to a fresh session: the caller relies on
+ * the stored providerSessionId for conversation continuity, and silently
+ * starting over would lose context while reporting success.
+ */
+async function loadExistingAcpSession(
+  context: ClientContext,
+  provider: string,
+  cwd: string,
+  sessionId: string,
+): Promise<ActiveSession> {
+  let loadResponse: unknown;
+  try {
+    loadResponse = await context.request("session/load", {
+      sessionId,
+      cwd,
+      mcpServers: [],
+    });
+  } catch (error) {
+    throw new Error(
+      `${provider} could not load ACP session '${sessionId}': ${errorMessage(error)}. ` +
+        "The follow-up was not started and no new session was created.",
+    );
+  }
+
+  // The SDK only exposes its ActiveSession helper for `session/new` responses.
+  // `session/load` responses omit the session id (the client already knows it),
+  // so reattach it before handing the response to the same attach machinery.
+  const attacher = context as unknown as {
+    attachSession(response: Record<string, unknown>): ActiveSession;
+  };
+  return attacher.attachSession({ sessionId, ...(asRecord(loadResponse) ?? {}) });
 }
 
 export function resolveAcpModelConfigUpdate(
