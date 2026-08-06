@@ -1,5 +1,6 @@
 import { spawnSync } from "node:child_process";
 import { delimiter, resolve } from "node:path";
+import { acpCommandFor } from "./local-agent-adapters.js";
 import { removeDevspaceNodeModulesBinFromPath } from "./local-agent-path.js";
 import {
   LOCAL_AGENT_PROVIDERS,
@@ -34,9 +35,9 @@ export function checkLocalAgentProviderAvailability(
         env: piAvailabilityEnvironment(env),
       });
     case "cursor":
-      return commandAvailability(provider, "cursor-agent");
     case "copilot":
-      return commandAvailability(provider, "copilot");
+    case "kimi":
+      return commandAvailability(provider, acpCommandFor(provider, env)[0]);
   }
 }
 

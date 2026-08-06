@@ -96,6 +96,34 @@ try {
   const profilesWithInvalid = await loadLocalAgentProfiles(enabledConfig, workspaceRoot);
   assert.deepEqual(profilesWithInvalid.map((profile) => profile.name), ["reviewer"]);
 
+  await writeFile(
+    join(configDir, "agents", "luna-worker.md"),
+    [
+      "---",
+      "name: luna-worker",
+      "description: Kimi implementation worker.",
+      "provider: kimi",
+      "model: kimi-k2.5",
+      "thinking: xhigh",
+      "---",
+      "",
+      "Worker body.",
+      "",
+    ].join("\n"),
+  );
+  const profilesWithKimi = await loadLocalAgentProfiles(enabledConfig, workspaceRoot);
+  const kimiProfile = profilesWithKimi.find((profile) => profile.name === "luna-worker");
+  assert.equal(kimiProfile?.provider, "kimi");
+  assert.equal(kimiProfile?.model, "kimi-k2.5");
+  assert.equal(kimiProfile?.thinking, "xhigh");
+  assert.deepEqual(summarizeLocalAgentProfile(kimiProfile!), {
+    name: "luna-worker",
+    description: "Kimi implementation worker.",
+    provider: "kimi",
+    model: "kimi-k2.5",
+    thinking: "xhigh",
+  });
+
   const disabledConfig = loadConfig({
     DEVSPACE_CONFIG_DIR: configDir,
     DEVSPACE_ALLOWED_ROOTS: workspaceRoot,

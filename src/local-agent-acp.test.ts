@@ -9,6 +9,7 @@ import { acpCommandFor, createLocalAgentAdapter } from "./local-agent-adapters.j
 
 assert.deepEqual(acpCommandFor("cursor", {}), ["cursor-agent", "acp"]);
 assert.deepEqual(acpCommandFor("copilot", {}), ["copilot", "--acp"]);
+assert.deepEqual(acpCommandFor("kimi", {}), ["kimi", "acp"]);
 assert.deepEqual(
   acpCommandFor("cursor", { CURSOR_COMMAND: "/opt/tools/cursor-agent" }),
   ["/opt/tools/cursor-agent", "acp"],
@@ -16,6 +17,10 @@ assert.deepEqual(
 assert.deepEqual(
   acpCommandFor("copilot", { COPILOT_COMMAND: "/opt/tools/gh-copilot" }),
   ["/opt/tools/gh-copilot", "--acp"],
+);
+assert.deepEqual(
+  acpCommandFor("kimi", { KIMI_COMMAND: "/opt/kimi/bin/kimi" }),
+  ["/opt/kimi/bin/kimi", "acp"],
 );
 
 // ACP lifecycle integration against the fake agent. The fake speaks real ACP
@@ -153,6 +158,52 @@ if (process.platform !== "win32") {
     }
     Object.assign(process.env, savedEnv);
     rmSync(sandbox, { recursive: true, force: true });
+  }
+
+  // Kimi runs through the same generic ACP adapter, resolved via KIMI_COMMAND,
+  // including loaded-session follow-ups.
+  {
+    const kimiSandbox = mkdtempSync(join(tmpdir(), "devspace-acp-kimi-test-"));
+    const kimiWorkspace = join(kimiSandbox, "workspace");
+    mkdirSync(kimiWorkspace, { recursive: true });
+    const kimiStorePath = join(kimiSandbox, "fake-store.json");
+    const kimiShim = join(kimiSandbox, "fake-kimi-shim.sh");
+    writeFileSync(
+      kimiShim,
+      `#!/bin/sh\nexec "${process.execPath}" "${fixturePath}" "$@"\n`,
+      { encoding: "utf8", mode: 0o755 },
+    );
+    chmodSync(kimiShim, 0o755);
+
+    process.env.KIMI_COMMAND = kimiShim;
+    process.env.FAKE_ACP_STORE = kimiStorePath;
+    delete process.env.FAKE_ACP_EVENTS;
+    try {
+      const kimi = createLocalAgentAdapter("kimi");
+      assert.equal(kimi.provider, "kimi");
+
+      const first = await kimi.run({
+        prompt: "remember token quokka-99",
+        workspace: kimiWorkspace,
+      });
+      assert.equal(first.providerSessionId, "fake-session-1");
+
+      const followUp = await kimi.run({
+        prompt: "recall the token",
+        workspace: kimiWorkspace,
+        providerSessionId: first.providerSessionId ?? undefined,
+      });
+      assert.equal(followUp.providerSessionId, "fake-session-1");
+      assert.equal(followUp.finalResponse, "recalled: remember token quokka-99");
+
+      const store = JSON.parse(readFileSync(kimiStorePath, "utf8"));
+      assert.equal(store.newCalls, 1);
+      assert.equal(store.loadCalls, 1);
+    } finally {
+      delete process.env.KIMI_COMMAND;
+      delete process.env.FAKE_ACP_STORE;
+      rmSync(kimiSandbox, { recursive: true, force: true });
+    }
   }
 }
 

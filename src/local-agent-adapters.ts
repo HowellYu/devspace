@@ -16,7 +16,7 @@ export interface LocalAgentAdapter {
   run(input: LocalAgentRunInput): Promise<LocalAgentRunResult>;
 }
 
-export type AcpLocalAgentProvider = "cursor" | "copilot";
+export type AcpLocalAgentProvider = "cursor" | "copilot" | "kimi";
 
 const PI_AGENT_TIMEOUT_MS = 120_000;
 
@@ -29,6 +29,8 @@ export function acpCommandFor(
       return [env.CURSOR_COMMAND ?? "cursor-agent", "acp"];
     case "copilot":
       return [env.COPILOT_COMMAND ?? "copilot", "--acp"];
+    case "kimi":
+      return [env.KIMI_COMMAND ?? "kimi", "acp"];
   }
 }
 
@@ -51,6 +53,7 @@ export function createLocalAgentAdapter(provider: LocalAgentProvider): LocalAgen
       return new PiRpcLocalAgentAdapter();
     case "cursor":
     case "copilot":
+    case "kimi":
       return new AcpLocalAgentAdapter(provider);
   }
 }
