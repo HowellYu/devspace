@@ -18,7 +18,27 @@ export interface LocalAgentAdapter {
 
 export type AcpLocalAgentProvider = "cursor" | "copilot" | "kimi";
 
-const PI_AGENT_TIMEOUT_MS = 120_000;
+const PI_AGENT_DEFAULT_TIMEOUT_MS = 120_000;
+const PI_AGENT_MIN_TIMEOUT_MS = 1_000;
+const PI_AGENT_MAX_TIMEOUT_MS = 3_600_000;
+
+export function resolvePiAgentTimeoutMs(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = env.DEVSPACE_PI_TIMEOUT_MS;
+  if (raw === undefined || raw.trim() === "") return PI_AGENT_DEFAULT_TIMEOUT_MS;
+  const trimmed = raw.trim();
+  if (!/^\d+$/.test(trimmed)) {
+    throw new Error(
+      `Invalid DEVSPACE_PI_TIMEOUT_MS: ${raw}. Expected a positive integer number of milliseconds.`,
+    );
+  }
+  const value = Number.parseInt(trimmed, 10);
+  if (value < PI_AGENT_MIN_TIMEOUT_MS || value > PI_AGENT_MAX_TIMEOUT_MS) {
+    throw new Error(
+      `Invalid DEVSPACE_PI_TIMEOUT_MS: ${raw}. Expected between ${PI_AGENT_MIN_TIMEOUT_MS} and ${PI_AGENT_MAX_TIMEOUT_MS} milliseconds.`,
+    );
+  }
+  return value;
+}
 
 export function acpCommandFor(
   provider: AcpLocalAgentProvider,
@@ -413,7 +433,7 @@ class PiRpcLocalAgentAdapter implements LocalAgentAdapter {
     try {
       const state = await rpc.request({ type: "get_state" });
       const providerSessionId = readNestedString(state, ["sessionId"]) ?? input.providerSessionId ?? null;
-      const done = rpc.waitForEvent((event) => asRecord(event)?.type === "agent_end", PI_AGENT_TIMEOUT_MS);
+      const done = rpc.waitForEvent((event) => asRecord(event)?.type === "agent_end", resolvePiAgentTimeoutMs());
       await rpc.request({ type: "prompt", message: input.prompt });
       const agentEnd = await done;
       const sessionMessages = await rpc.request({ type: "get_messages" });

@@ -157,6 +157,12 @@ skill teaches the model to use only the minimal `devspace agents ls`,
 Starter profile templates are available under `examples/agents/`. Copy or adapt
 them into one of the active profile directories before use.
 
+## Subagent Providers
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `DEVSPACE_PI_TIMEOUT_MS` | `120000` | Maximum wait for a `pi` subagent run to complete. Accepts an integer between `1000` and `3600000` milliseconds. |
+
 Legacy project paths such as `.pi/skills` can be added through `DEVSPACE_SKILL_PATHS` when needed.
 
 Example:

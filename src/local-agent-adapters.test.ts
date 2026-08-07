@@ -10,6 +10,7 @@ import {
   piCommandEnvironment,
   resolveAcpModelConfigUpdate,
   resolveAcpThinkingConfigUpdate,
+  resolvePiAgentTimeoutMs,
 } from "./local-agent-adapters.js";
 import { removeDevspaceNodeModulesBinFromPath } from "./local-agent-path.js";
 import type { LocalAgentProvider } from "./local-agent-profiles.js";
@@ -388,4 +389,19 @@ assert.equal(
   });
 
   assert.equal(env.PATH, [devspaceBin, "/home/user/.local/bin"].join(delimiter));
+}
+
+// DEVSPACE_PI_TIMEOUT_MS parsing.
+
+assert.equal(resolvePiAgentTimeoutMs({}), 120_000);
+assert.equal(resolvePiAgentTimeoutMs({ DEVSPACE_PI_TIMEOUT_MS: "" }), 120_000);
+assert.equal(resolvePiAgentTimeoutMs({ DEVSPACE_PI_TIMEOUT_MS: "300000" }), 300_000);
+assert.equal(resolvePiAgentTimeoutMs({ DEVSPACE_PI_TIMEOUT_MS: " 45000 " }), 45_000);
+assert.equal(resolvePiAgentTimeoutMs({ DEVSPACE_PI_TIMEOUT_MS: "3600000" }), 3_600_000);
+
+for (const invalid of ["abc", "10.5", "-5", "0", "500", "3600001", "99999999999"]) {
+  assert.throws(
+    () => resolvePiAgentTimeoutMs({ DEVSPACE_PI_TIMEOUT_MS: invalid }),
+    /Invalid DEVSPACE_PI_TIMEOUT_MS/,
+  );
 }
