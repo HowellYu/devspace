@@ -135,6 +135,43 @@ Legacy project paths such as `.pi/skills` can be added through `DEVSPACE_SKILL_P
 When `open_workspace` returns matching skills, the model should read the
 advertised `SKILL.md` before following that skill.
 
+## Brain/Worker Delegation
+
+The intended high-leverage workflow is for the host model to act as the brain
+and for configured subagents to act as workers: the host designs, specifies,
+and reviews; workers run the local edit-test-fix loop.
+
+1. Open the workspace and write a self-contained worker prompt (goal, context,
+   relevant files, acceptance criteria, rules).
+2. Start a worker: `devspace agents run luna-worker "<prompt>"`.
+3. Wait once: `devspace agents wait <id> --timeout 300`. Do not poll
+   `agents show` in a loop; `wait` returns the final response exactly once and
+   a timeout never stops the worker.
+4. Review through the change checkpoint (`show_changes` with
+   `DEVSPACE_WIDGETS=changes`) rather than rereading the repository.
+5. Send corrections as a follow-up to the same session:
+   `devspace agents run <id> "<review findings>"`. ACP providers (`cursor`,
+   `copilot`, `kimi`) resume the stored provider conversation through
+   `session/load`. If the provider cannot load the previous session, the run
+   fails instead of silently starting over.
+
+Security posture for workers:
+
+- A subagent process runs with the permissions of the operating-system user
+  that runs DevSpace. `cwd = workspace` is not a sandbox, and DevSpace allowed
+  roots restrict DevSpace file tools, not provider child processes.
+- Run DevSpace and workers under a dedicated, non-admin operating-system user
+  with access only to the intended project directories.
+- Profiles such as `luna-explorer` are instruction-level read-only. Do not
+  describe them as security-enforced read-only unless an external sandbox
+  exists.
+- Use worktrees for workflow isolation between parallel workers, not as a
+  security boundary.
+
+Concurrency guardrails: start with one implementation worker and at most two
+explorers, keep parallel workers on non-overlapping files, and prefer targeted
+tests before full-suite runs.
+
 Skill paths may be outside the workspace. DevSpace only permits reading:
 
 - advertised `SKILL.md` files

@@ -66,6 +66,7 @@ provider: opencode
 provider: pi
 provider: cursor
 provider: copilot
+provider: kimi
 ```
 
 Unsupported or custom providers are rejected. DevSpace maps providers to their
@@ -77,6 +78,7 @@ native integration:
 - `pi`: Pi RPC mode
 - `cursor`: ACP
 - `copilot`: ACP
+- `kimi`: ACP (Kimi Code CLI, `kimi acp`; override the binary with `KIMI_COMMAND`)
 
 ### `model`
 
@@ -105,7 +107,7 @@ DevSpace passes this through to providers that expose a matching control:
 - `codex`: SDK model reasoning effort.
 - `pi`: `--thinking`.
 - `opencode`: model variant.
-- `cursor` and `copilot`: ACP thought-level config when supported.
+- `cursor`, `copilot`, and `kimi`: ACP thought-level config when supported.
 
 ### `disabled`
 
@@ -134,6 +136,7 @@ The Subagent skill teaches only:
 ```bash
 devspace agents ls
 devspace agents run <profile-or-id> "<prompt>"
+devspace agents wait <id> [--timeout <seconds>]
 devspace agents show <id>
 ```
 

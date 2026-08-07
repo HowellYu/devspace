@@ -152,7 +152,8 @@ agent without reading provider-specific launch details. `devspace agents ls`
 lists existing subagent sessions for the current workspace, scoped by the
 workspace environment injected into shell commands. The `subagent-delegation`
 skill teaches the model to use only the minimal `devspace agents ls`,
-`devspace agents run`, and `devspace agents show` workflow.
+`devspace agents run`, `devspace agents wait`, and `devspace agents show`
+workflow.
 
 Starter profile templates are available under `examples/agents/`. Copy or adapt
 them into one of the active profile directories before use.
@@ -161,7 +162,15 @@ them into one of the active profile directories before use.
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
+| `KIMI_COMMAND` | `kimi` | Executable for the `kimi` ACP provider; DevSpace runs `<command> acp`. |
+| `CURSOR_COMMAND` | `cursor-agent` | Executable for the `cursor` ACP provider. |
+| `COPILOT_COMMAND` | `copilot` | Executable for the `copilot` ACP provider. |
+| `DEVSPACE_AGENTS_WAIT_TIMEOUT` | `300` | Default `devspace agents wait` timeout in seconds (`1`-`3600`). |
 | `DEVSPACE_PI_TIMEOUT_MS` | `120000` | Maximum wait for a `pi` subagent run to complete. Accepts an integer between `1000` and `3600000` milliseconds. |
+
+ACP providers (`cursor`, `copilot`, `kimi`) resume stored provider sessions on
+follow-up runs through `session/load`. A failed load aborts the run rather
+than silently starting a new conversation.
 
 Legacy project paths such as `.pi/skills` can be added through `DEVSPACE_SKILL_PATHS` when needed.
 
