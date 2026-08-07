@@ -14,6 +14,110 @@
   <a href="https://github.com/Waishnav/devspace/blob/main/LICENSE"><img alt="License" src="https://img.shields.io/npm/l/%40waishnav%2Fdevspace?style=flat-square" /></a>
 </p>
 
+---
+
+> ## ⚠️ This is the Luna fork — read this section first
+>
+> This fork (`HowellYu/devspace`, branch `feat/kimi-agent-layer`) turns DevSpace
+> into a two-tier agentic layer: **ChatGPT is the brain** (design, specs,
+> review) and **Luna is the worker** (implementation, exploration, test-fix
+> loops). ChatGPT's scarce rate limit is spent on a few high-value turns;
+> Luna does the heavy local work on the flat Kimi Code subscription quota.
+>
+> ### What the fork adds over upstream
+>
+> - **Reliable ACP session resume** — follow-up runs use `session/load`, so
+>   workers keep their conversation context. A failed load aborts loudly
+>   instead of silently starting over.
+> - **`luna` subagent provider** — runs the Kimi Code CLI (`kimi acp`) through
+>   the generic ACP adapter. Binary override: `LUNA_COMMAND`.
+> - **`devspace agents wait <id>`** — blocking completion; one start + one wait
+>   instead of polling `agents show`.
+> - **`luna-worker` / `luna-explorer` example profiles** (`examples/agents/`).
+> - **`DEVSPACE_PI_TIMEOUT_MS`** — configurable pi timeout (fallback worker path).
+> - Docs: brain/worker playbook in `docs/chatgpt-coding-workflow.md`.
+>
+> ### Install
+>
+> Prerequisites: Node `>=22.19 <27`, Git, Bash, Tailscale (for the tunnel),
+> and a Kimi membership that includes Kimi Code (Moderato or higher).
+>
+> ```bash
+> # 1. The fork (this is what you run for the Luna workflow)
+> git clone git@github.com:HowellYu/devspace.git
+> cd devspace
+> git switch feat/kimi-agent-layer
+> npm install --include=dev
+> npm run build
+>
+> # 2. Kimi Code CLI (the Luna worker binary)
+> curl -fsSL https://code.kimi.com/kimi-code/install.sh | bash
+> kimi            # then: /login  → choose "Kimi Code OAuth" (subscription)
+> ```
+>
+> **Login matters:** choose **Kimi Code OAuth**, not a Moonshot Open Platform
+> API key. OAuth draws from your flat weekly plan quota (`kimi-for-coding`);
+> a platform API key bills per token separately. Confirm with `/usage` in the
+> CLI. The binary lands in `~/.kimi-code/bin/kimi` — add it to PATH or set
+> `LUNA_COMMAND` (below).
+>
+> ### Configure
+>
+> ```bash
+> # 3. Install the Luna profiles (global, or .devspace/agents/ per project)
+> mkdir -p ~/.devspace/agents
+> cp examples/agents/luna-worker.md examples/agents/luna-explorer.md ~/.devspace/agents/
+>
+> # 4. Server environment
+> export DEVSPACE_SUBAGENTS=1
+> export DEVSPACE_WIDGETS=changes
+> export DEVSPACE_TOOL_MODE=minimal
+> export LUNA_COMMAND="$HOME/.kimi-code/bin/kimi"
+>
+> # 5. First-time setup (allowed roots, port, public tunnel URL)
+> node dist/cli.js init
+> ```
+>
+> ### Run
+>
+> ```bash
+> node dist/cli.js serve     # serves http://127.0.0.1:7676/mcp
+> ```
+>
+> Expose it through your Tailscale Funnel as before and point the ChatGPT
+> connector at `https://<your-tailscale-host>/mcp`. The owner-password
+> approval flow is unchanged. (The released npm package
+> `@waishnav/devspace` still works as a stable fallback without Luna.)
+>
+> ### Daily workflow (ChatGPT side)
+>
+> 1. `open_workspace` a project inside an allowed root.
+> 2. Write a self-contained spec and delegate:
+>    `devspace agents run luna-worker "<goal / context / files / acceptance criteria>"`
+> 3. Wait once: `devspace agents wait <id> --timeout 300`.
+> 4. Review the consolidated checkpoint diff (`show_changes`), not the repo.
+> 5. Corrections go back to the **same** session:
+>    `devspace agents run <id> "<review findings>"` — Luna resumes, never restarts.
+>
+> Use `luna-explorer` for read-only investigations. Its read-only behavior is
+> instruction-level, not sandboxed — see the security notes in
+> `docs/chatgpt-coding-workflow.md` (dedicated OS user recommended).
+>
+> ### Maintaining the fork
+>
+> ```bash
+> git fetch upstream
+> git switch feat/kimi-agent-layer
+> git rebase upstream/main
+> npm install && npm run typecheck && npm test && npm run build
+> git push --force-with-lease origin feat/kimi-agent-layer
+> ```
+>
+> One branch, one concern — keep unrelated changes off it. The full plan and
+> acceptance criteria live in `.agents/plan/` (local, untracked working docs).
+>
+> ---
+
 [![DevSpace connected to ChatGPT](https://raw.githubusercontent.com/Waishnav/devspace/main/docs/assets/devspace-screenshot.png)](https://raw.githubusercontent.com/Waishnav/devspace/main/docs/assets/devspace-screenshot.png)
 
 **Give ChatGPT a secure connection to your own machine and Turn ChatGPT into Codex**
