@@ -196,6 +196,61 @@ test("an unborn repository becomes reviewable after its first commit", async (t)
   assert.equal(afterFirstCommit.patch, "");
 });
 
+test("checkpoint diffs capture detached worker edits, deletions, and renames", async (t) => {
+  const root = await committedRepository(t);
+  const manager = createReviewCheckpointManager();
+  await manager.initializeWorkspace({ workspaceId: "ws_detached", root });
+
+  // Establish the review baseline before the "worker" starts.
+  const baseline = await manager.reviewChanges({
+    workspaceId: "ws_detached",
+    root,
+    markReviewed: true,
+  });
+  assert.equal(baseline.summary.files, 0);
+
+  // A detached subagent process edits the checkout directly: modifies a
+  // tracked file, adds a new file, deletes one, and renames another.
+  await writeFile(join(root, "README.md"), "hello\nworker edit\n");
+  await writeFile(join(root, "worker-added.ts"), "export const worker = true;\n");
+  await writeFile(join(root, "doomed.txt"), "gone soon\n");
+  await writeFile(join(root, "original-name.txt"), "renamed contents\n");
+  await git(root, ["add", "doomed.txt", "original-name.txt"]);
+  await git(root, ["commit", "-m", "Add files the worker will touch"]);
+  await manager.reviewChanges({ workspaceId: "ws_detached", root, markReviewed: true });
+
+  await writeFile(join(root, "README.md"), "hello\nworker edit\nmore worker edits\n");
+  await rm(join(root, "doomed.txt"));
+  await rm(join(root, "original-name.txt"));
+  await writeFile(join(root, "renamed-file.txt"), "rewritten after rename\n");
+
+  const review = await manager.reviewChanges({
+    workspaceId: "ws_detached",
+    root,
+    markReviewed: false,
+  });
+  const paths = review.files.map((file) => file.path);
+  assert.ok(paths.includes("README.md"), `expected README.md in ${paths}`);
+  assert.ok(paths.includes("doomed.txt"), `expected doomed.txt in ${paths}`);
+  assert.ok(paths.includes("original-name.txt"), `expected original-name.txt deletion in ${paths}`);
+  assert.ok(paths.includes("renamed-file.txt"), `expected renamed-file.txt in ${paths}`);
+  assert.match(review.patch, /more worker edits/);
+  assert.match(review.patch, /rewritten after rename/);
+  assert.match(review.patch, /doomed\.txt/);
+
+  // Advancing happens only when requested: an unmarked re-review shows the
+  // same set, a marked review clears it.
+  const again = await manager.reviewChanges({
+    workspaceId: "ws_detached",
+    root,
+    markReviewed: false,
+  });
+  assert.equal(again.summary.files, review.summary.files);
+  await manager.reviewChanges({ workspaceId: "ws_detached", root, markReviewed: true });
+  const cleared = await manager.reviewChanges({ workspaceId: "ws_detached", root });
+  assert.equal(cleared.summary.files, 0);
+});
+
 async function committedRepository(t: TestContext): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), "devspace-review-checkpoints-test-"));
   t.after(() => rm(root, { recursive: true, force: true }));
