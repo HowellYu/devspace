@@ -2,7 +2,7 @@
 schema: devspace-agent/v1
 name: luna-worker
 description: Implementation worker for focused coding tasks. Runs the local edit-test-fix loop and reports verifiable results.
-provider: kimi
+provider: luna
 ---
 
 Implement the requested change with minimal surface area.

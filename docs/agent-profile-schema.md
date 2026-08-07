@@ -66,7 +66,7 @@ provider: opencode
 provider: pi
 provider: cursor
 provider: copilot
-provider: kimi
+provider: luna
 ```
 
 Unsupported or custom providers are rejected. DevSpace maps providers to their
@@ -78,7 +78,7 @@ native integration:
 - `pi`: Pi RPC mode
 - `cursor`: ACP
 - `copilot`: ACP
-- `kimi`: ACP (Kimi Code CLI, `kimi acp`; override the binary with `KIMI_COMMAND`)
+- `luna`: ACP (Kimi Code CLI, `kimi acp`; override the binary with `LUNA_COMMAND`)
 
 ### `model`
 
@@ -107,7 +107,7 @@ DevSpace passes this through to providers that expose a matching control:
 - `codex`: SDK model reasoning effort.
 - `pi`: `--thinking`.
 - `opencode`: model variant.
-- `cursor`, `copilot`, and `kimi`: ACP thought-level config when supported.
+- `cursor`, `copilot`, and `luna`: ACP thought-level config when supported.
 
 ### `disabled`
 

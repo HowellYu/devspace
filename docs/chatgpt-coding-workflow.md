@@ -151,7 +151,7 @@ and reviews; workers run the local edit-test-fix loop.
    `DEVSPACE_WIDGETS=changes`) rather than rereading the repository.
 5. Send corrections as a follow-up to the same session:
    `devspace agents run <id> "<review findings>"`. ACP providers (`cursor`,
-   `copilot`, `kimi`) resume the stored provider conversation through
+   `copilot`, `luna`) resume the stored provider conversation through
    `session/load`. If the provider cannot load the previous session, the run
    fails instead of silently starting over.
 

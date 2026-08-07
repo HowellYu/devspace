@@ -145,7 +145,7 @@ try {
           workspaceId: "ws_wait",
           workspaceRoot: projectRoot,
           profileName: "luna-worker",
-          provider: "kimi",
+          provider: "luna",
         }).id,
         patch,
       );
@@ -158,15 +158,15 @@ try {
   {
     const record = seedAgent({ status: "idle", latestResponse: "worker final answer 12345" });
     const output = runCli(["agents", "wait", record.id]);
-    assert.match(output, new RegExp(`${record.id} idle luna-worker kimi`));
+    assert.match(output, new RegExp(`${record.id} idle luna-worker luna`));
     assert.equal(output.split("worker final answer 12345").length - 1, 1);
   }
 
   // Failed worker: prints the recorded error.
   {
-    const record = seedAgent({ status: "error", error: "kimi acp exploded cleanly" });
+    const record = seedAgent({ status: "error", error: "luna acp exploded cleanly" });
     const output = runCli(["agents", "wait", record.id]);
-    assert.match(output, /kimi acp exploded cleanly/);
+    assert.match(output, /luna acp exploded cleanly/);
   }
 
   // Active worker at timeout: reports status, does not stop the worker.

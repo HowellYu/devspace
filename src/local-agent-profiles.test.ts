@@ -102,7 +102,7 @@ try {
       "---",
       "name: luna-worker",
       "description: Kimi implementation worker.",
-      "provider: kimi",
+      "provider: luna",
       "model: kimi-k2.5",
       "thinking: xhigh",
       "---",
@@ -113,13 +113,13 @@ try {
   );
   const profilesWithKimi = await loadLocalAgentProfiles(enabledConfig, workspaceRoot);
   const kimiProfile = profilesWithKimi.find((profile) => profile.name === "luna-worker");
-  assert.equal(kimiProfile?.provider, "kimi");
+  assert.equal(kimiProfile?.provider, "luna");
   assert.equal(kimiProfile?.model, "kimi-k2.5");
   assert.equal(kimiProfile?.thinking, "xhigh");
   assert.deepEqual(summarizeLocalAgentProfile(kimiProfile!), {
     name: "luna-worker",
     description: "Kimi implementation worker.",
-    provider: "kimi",
+    provider: "luna",
     model: "kimi-k2.5",
     thinking: "xhigh",
   });
@@ -159,7 +159,7 @@ try {
     const profiles = await loadLocalAgentProfiles(config, workspaceRoot);
     assert.deepEqual(profiles.map((profile) => profile.name), ["luna-explorer", "luna-worker"]);
     for (const profile of profiles) {
-      assert.equal(profile.provider, "kimi");
+      assert.equal(profile.provider, "luna");
       // Model and thinking stay unset until validated against live Kimi ACP
       // config options; the Kimi CLI defaults apply when omitted.
       assert.equal(profile.model, undefined);

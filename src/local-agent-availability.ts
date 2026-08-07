@@ -36,7 +36,7 @@ export function checkLocalAgentProviderAvailability(
       });
     case "cursor":
     case "copilot":
-    case "kimi":
+    case "luna":
       return commandAvailability(provider, acpCommandFor(provider, env)[0]);
   }
 }

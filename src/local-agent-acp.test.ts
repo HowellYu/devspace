@@ -9,7 +9,7 @@ import { acpCommandFor, createLocalAgentAdapter } from "./local-agent-adapters.j
 
 assert.deepEqual(acpCommandFor("cursor", {}), ["cursor-agent", "acp"]);
 assert.deepEqual(acpCommandFor("copilot", {}), ["copilot", "--acp"]);
-assert.deepEqual(acpCommandFor("kimi", {}), ["kimi", "acp"]);
+assert.deepEqual(acpCommandFor("luna", {}), ["kimi", "acp"]);
 assert.deepEqual(
   acpCommandFor("cursor", { CURSOR_COMMAND: "/opt/tools/cursor-agent" }),
   ["/opt/tools/cursor-agent", "acp"],
@@ -19,8 +19,8 @@ assert.deepEqual(
   ["/opt/tools/gh-copilot", "--acp"],
 );
 assert.deepEqual(
-  acpCommandFor("kimi", { KIMI_COMMAND: "/opt/kimi/bin/kimi" }),
-  ["/opt/kimi/bin/kimi", "acp"],
+  acpCommandFor("luna", { LUNA_COMMAND: "/opt/luna/bin/kimi" }),
+  ["/opt/luna/bin/kimi", "acp"],
 );
 
 // ACP lifecycle integration against the fake agent. The fake speaks real ACP
@@ -160,49 +160,49 @@ if (process.platform !== "win32") {
     rmSync(sandbox, { recursive: true, force: true });
   }
 
-  // Kimi runs through the same generic ACP adapter, resolved via KIMI_COMMAND,
+  // Luna runs through the same generic ACP adapter, resolved via LUNA_COMMAND,
   // including loaded-session follow-ups.
   {
-    const kimiSandbox = mkdtempSync(join(tmpdir(), "devspace-acp-kimi-test-"));
-    const kimiWorkspace = join(kimiSandbox, "workspace");
-    mkdirSync(kimiWorkspace, { recursive: true });
-    const kimiStorePath = join(kimiSandbox, "fake-store.json");
-    const kimiShim = join(kimiSandbox, "fake-kimi-shim.sh");
+    const lunaSandbox = mkdtempSync(join(tmpdir(), "devspace-acp-luna-test-"));
+    const lunaWorkspace = join(lunaSandbox, "workspace");
+    mkdirSync(lunaWorkspace, { recursive: true });
+    const lunaStorePath = join(lunaSandbox, "fake-store.json");
+    const lunaShim = join(lunaSandbox, "fake-luna-shim.sh");
     writeFileSync(
-      kimiShim,
+      lunaShim,
       `#!/bin/sh\nexec "${process.execPath}" "${fixturePath}" "$@"\n`,
       { encoding: "utf8", mode: 0o755 },
     );
-    chmodSync(kimiShim, 0o755);
+    chmodSync(lunaShim, 0o755);
 
-    process.env.KIMI_COMMAND = kimiShim;
-    process.env.FAKE_ACP_STORE = kimiStorePath;
+    process.env.LUNA_COMMAND = lunaShim;
+    process.env.FAKE_ACP_STORE = lunaStorePath;
     delete process.env.FAKE_ACP_EVENTS;
     try {
-      const kimi = createLocalAgentAdapter("kimi");
-      assert.equal(kimi.provider, "kimi");
+      const luna = createLocalAgentAdapter("luna");
+      assert.equal(luna.provider, "luna");
 
-      const first = await kimi.run({
+      const first = await luna.run({
         prompt: "remember token quokka-99",
-        workspace: kimiWorkspace,
+        workspace: lunaWorkspace,
       });
       assert.equal(first.providerSessionId, "fake-session-1");
 
-      const followUp = await kimi.run({
+      const followUp = await luna.run({
         prompt: "recall the token",
-        workspace: kimiWorkspace,
+        workspace: lunaWorkspace,
         providerSessionId: first.providerSessionId ?? undefined,
       });
       assert.equal(followUp.providerSessionId, "fake-session-1");
       assert.equal(followUp.finalResponse, "recalled: remember token quokka-99");
 
-      const store = JSON.parse(readFileSync(kimiStorePath, "utf8"));
+      const store = JSON.parse(readFileSync(lunaStorePath, "utf8"));
       assert.equal(store.newCalls, 1);
       assert.equal(store.loadCalls, 1);
     } finally {
-      delete process.env.KIMI_COMMAND;
+      delete process.env.LUNA_COMMAND;
       delete process.env.FAKE_ACP_STORE;
-      rmSync(kimiSandbox, { recursive: true, force: true });
+      rmSync(lunaSandbox, { recursive: true, force: true });
     }
   }
 }

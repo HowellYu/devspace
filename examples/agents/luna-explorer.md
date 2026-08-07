@@ -2,7 +2,7 @@
 schema: devspace-agent/v1
 name: luna-explorer
 description: Instruction-level read-only codebase explorer for bounded architecture and implementation questions.
-provider: kimi
+provider: luna
 ---
 
 Investigate without modifying files.
