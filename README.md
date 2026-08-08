@@ -81,8 +81,15 @@
 > ### Run
 >
 > ```bash
-> node dist/cli.js serve     # serves http://127.0.0.1:7676/mcp
+> scripts/serve.sh     # sets the env below, then serves http://127.0.0.1:7676/mcp
 > ```
+>
+> The launcher exports `DEVSPACE_WIDGETS=changes`, `DEVSPACE_TOOL_MODE=minimal`,
+> and `LUNA_COMMAND=~/.kimi-code/bin/kimi` (override any of them by exporting
+> first), and fails fast with a clear error if the build or the Luna CLI is
+> missing — including typo'd paths like the classic `kimi~`. To run by hand
+> instead, export the same three variables and run `node dist/cli.js serve`.
+> The server runs in the foreground; keep the terminal open.
 >
 > Expose it through your Tailscale Funnel as before and point the ChatGPT
 > connector at `https://<your-tailscale-host>/mcp`. The owner-password
