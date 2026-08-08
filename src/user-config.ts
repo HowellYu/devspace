@@ -62,7 +62,7 @@ export function loadDevspaceFiles(env: NodeJS.ProcessEnv = process.env): Devspac
   const configPath = join(dir, "config.json");
   const authPath = join(dir, "auth.json");
   const configExists = existsSync(configPath);
-  const authExists = existsSync(authPath);
+  const authExists = env.DEVSPACE_OAUTH_OWNER_TOKEN ? false : existsSync(authPath);
 
   return {
     dir,

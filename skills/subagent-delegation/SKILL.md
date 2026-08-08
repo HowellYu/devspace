@@ -83,11 +83,15 @@ DevSpace agent integration.
 If a subagent provider is unavailable, run `devspace doctor` to check provider
 availability, local listener health, and the public URL reachability advisory.
 
-Subagent workers inherit the local-user authority of the DevSpace process. ACP
-auto-approval inside a worker is a convenience, not a security boundary. The real
-boundary is the OS user account that runs DevSpace. Recommend that the user runs
-DevSpace as a dedicated, non-administrator account with access only to the
-intended project roots.
+On macOS, DevSpace enables a Seatbelt (`sandbox-exec`) workspace sandbox for
+workspace shells and detached worker processes by default. Treat this as a
+risk-reduction boundary, not a complete security guarantee: provider auth/config
+reads and inherited child-process permissions may still require narrowly scoped
+exceptions, and Apple has deprecated `sandbox-exec`. Extra paths must be explicit
+through `DEVSPACE_SANDBOX_READ_PATHS` or `DEVSPACE_SANDBOX_WRITE_PATHS`; do not
+broaden them silently. For the strongest isolation, recommend a dedicated,
+non-administrator OS account with filesystem permissions only for intended
+projects and DevSpace state.
 
 ## Choosing a profile
 

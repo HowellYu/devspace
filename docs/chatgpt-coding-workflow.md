@@ -161,14 +161,17 @@ and reviews; workers run the local edit-test-fix loop.
 
 Security posture for workers:
 
-- A subagent process runs with the permissions of the operating-system user
-  that runs DevSpace. `cwd = workspace` is not a sandbox, and DevSpace allowed
-  roots restrict DevSpace file tools, not provider child processes.
-- Run DevSpace and workers under a dedicated, non-admin operating-system user
-  with access only to the intended project directories.
-- Profiles such as `luna-explorer` are instruction-level read-only. Do not
-  describe them as security-enforced read-only unless an external sandbox
-  exists.
+- On macOS, workspace shells and detached workers are wrapped in a Seatbelt
+  (`sandbox-exec`) profile by default. Reads under other user/volume paths are
+  denied and writes are limited to the current workspace, DevSpace state,
+  temporary storage, and explicit grants.
+- Extra filesystem access must be explicit through `DEVSPACE_SANDBOX_READ_PATHS`
+  or `DEVSPACE_SANDBOX_WRITE_PATHS`; do not broaden those grants silently.
+- Seatbelt is still weaker than a dedicated OS account/container. Provider
+  authentication/configuration may require narrow read exceptions, and child
+  processes inherit the parent sandbox permissions.
+- Profiles such as `luna-explorer` remain instruction-level read-only; the OS
+  sandbox constrains paths but does not make the profile semantically read-only.
 - Use worktrees for workflow isolation between parallel workers, not as a
   security boundary.
 

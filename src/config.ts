@@ -30,6 +30,10 @@ export interface ServerConfig {
   devspaceAgentsDir: string;
   subagents: boolean;
   agentDir: string;
+  macosSandbox: boolean;
+  sandboxNetwork: boolean;
+  sandboxReadPaths: string[];
+  sandboxWritePaths: string[];
   logging: LoggingConfig;
 }
 
@@ -116,6 +120,18 @@ function parsePathList(value: string | undefined): string[] {
       .map((entry) => entry.trim())
       .filter(Boolean) ?? []
   );
+}
+
+function parseResolvedPathList(value: string | undefined): string[] {
+  return parsePathList(value).map((entry) => resolve(expandHomePath(entry)));
+}
+
+function parseMacosSandbox(value: string | undefined): boolean {
+  if (value === undefined || value === "") return process.platform === "darwin";
+  const normalized = value.toLowerCase();
+  if (["1", "true", "yes", "on", "workspace"].includes(normalized)) return true;
+  if (["0", "false", "no", "off"].includes(normalized)) return false;
+  throw new Error(`Invalid DEVSPACE_MACOS_SANDBOX: ${value}. Expected workspace/on or off.`);
 }
 
 function parseStringList(value: string | undefined, fallback: string[]): string[] {
@@ -252,6 +268,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
         ? files.config.subagents === true
         : parseBoolean(env.DEVSPACE_SUBAGENTS),
     agentDir: resolve(expandHomePath(env.DEVSPACE_AGENT_DIR ?? files.config.agentDir ?? defaultAgentDir())),
+    macosSandbox: parseMacosSandbox(env.DEVSPACE_MACOS_SANDBOX),
+    sandboxNetwork: env.DEVSPACE_SANDBOX_NETWORK === undefined ? true : parseBoolean(env.DEVSPACE_SANDBOX_NETWORK),
+    sandboxReadPaths: parseResolvedPathList(env.DEVSPACE_SANDBOX_READ_PATHS),
+    sandboxWritePaths: parseResolvedPathList(env.DEVSPACE_SANDBOX_WRITE_PATHS),
     logging: parseLoggingConfig(env),
   };
 }

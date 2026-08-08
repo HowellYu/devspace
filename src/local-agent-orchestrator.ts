@@ -1,8 +1,13 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { runLocalAgentProvider } from "./local-agent-adapters.js";
+import {
+  shouldUseMacosSandbox,
+  workerSandboxReadPaths,
+  wrapMacosSandboxCommand,
+} from "./macos-sandbox.js";
 import {
   checkLocalAgentProviderAvailability,
   refreshLocalAgentProviderAvailabilitySnapshot,
@@ -109,7 +114,11 @@ export function createLocalAgentOrchestrator(
   options: CreateLocalAgentOrchestratorOptions = {},
 ): LocalAgentOrchestrator {
   const runProvider = options.runProvider ?? runLocalAgentProvider;
-  const spawnWorker = options.spawnWorker ?? defaultSpawnWorker;
+  const spawnWorker = options.spawnWorker ?? ((recordId: string, promptFile: string) => {
+    const record = store.get(recordId);
+    if (!record) throw new Error(`Unknown subagent id: ${recordId}`);
+    return defaultSpawnWorker(config, record, promptFile);
+  });
   const watchdogs = new Map<string, NodeJS.Timeout>();
 
   const reconcile = (record: LocalAgentRecord): LocalAgentRecord => {
@@ -395,20 +404,37 @@ export function createLocalAgentOrchestrator(
   };
 }
 
-function defaultSpawnWorker(recordId: string, promptFile: string): ChildProcess {
+function defaultSpawnWorker(config: ServerConfig, record: LocalAgentRecord, promptFile: string): ChildProcess {
   const cliPath = resolveDevspaceCliPath();
-  const child = spawn(process.execPath, [
-    ...process.execArgv,
-    cliPath,
-    "agents",
-    "__worker",
-    recordId,
-    "--prompt-file",
-    promptFile,
-  ], {
+  const baseCommand = {
+    executable: process.execPath,
+    args: [
+      ...process.execArgv,
+      cliPath,
+      "agents",
+      "__worker",
+      record.id,
+      "--prompt-file",
+      promptFile,
+    ],
+  };
+  const command = shouldUseMacosSandbox(config)
+    ? wrapMacosSandboxCommand(baseCommand, {
+        workspaceRoot: record.workspaceRoot,
+        stateDir: config.stateDir,
+        readPaths: workerSandboxReadPaths(config, record.provider),
+        readFiles: [join(dirname(config.devspaceAgentsDir), "config.json")],
+        writePaths: config.sandboxWritePaths,
+        allowNetwork: config.sandboxNetwork,
+      })
+    : baseCommand;
+  const child = spawn(command.executable, command.args, {
     detached: true,
     stdio: "ignore",
-    env: process.env,
+    env: {
+      ...process.env,
+      DEVSPACE_OAUTH_OWNER_TOKEN: "devspace-worker-placeholder-token",
+    },
   });
   child.unref();
   return child;

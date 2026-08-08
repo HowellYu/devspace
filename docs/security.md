@@ -118,17 +118,26 @@ Use memory only for durable project facts, decisions, and checkpoints. Do not st
 ## Subagents and ACP Providers
 
 When subagents are enabled (`DEVSPACE_SUBAGENTS=1`), DevSpace can delegate tasks
-to local ACP providers such as `luna`, `cursor-agent`, or `copilot`. Those
-workers run with the same local-user authority as DevSpace itself. DevSpace file
-tools enforce configured roots, but provider child processes are not contained by
-those roots unless an external OS sandbox is in place.
+to local providers such as `luna`, `codex`, or `claude`. On macOS, DevSpace now
+wraps workspace shell sessions and detached worker processes with Seatbelt
+(`sandbox-exec`) by default. The policy blocks reads under other user/volume
+paths and blocks writes globally except the current workspace, DevSpace state,
+temporary storage, and explicitly configured sandbox grants. Network access is
+allowed by default because model providers and common development commands need
+it; set `DEVSPACE_SANDBOX_NETWORK=0` to deny it.
+
+Seatbelt is a substantial reduction in local authority, but it is not equivalent
+to a container, VM, or separate operating-system account. Provider authentication
+may require narrowly scoped read access to provider installation/config paths,
+and permissions inherited by provider child processes cannot be made stronger
+than the parent Seatbelt profile. `sandbox-exec` is also deprecated by Apple and
+may change in future macOS releases.
 
 ACP connectors may auto-approve tool requests within the delegated session. That
-auto-approval is a convenience inside the worker, not a security boundary. The
-real boundary is the operating-system user account that runs DevSpace. Run
-DevSpace as a dedicated, non-administrator OS user with access only to the
-projects it should touch. Do not run DevSpace as root, as an administrator, or
-as a user that owns sensitive credentials outside your coding workspace.
+auto-approval is a convenience inside the worker, not a security boundary. For
+the strongest isolation, run DevSpace as a dedicated, non-administrator OS user
+with filesystem permissions only for the intended projects and DevSpace state.
+Do not run DevSpace as root or an administrator.
 
 Review subagent output before acting on it, and keep subagent profiles narrow.
 Each worker run has a separate execution deadline (600 seconds by default,

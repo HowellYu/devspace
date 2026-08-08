@@ -1935,7 +1935,7 @@ function registerLocalAgentWorkerTools(
     {
       title: "Start worker",
       description:
-        "Start a subagent worker for an open workspace. The target can be a profile name returned by open_workspace or a built-in provider name. Returns immediately with a workerId; call wait_worker to collect the result. The worker inherits the local user's authority.",
+        "Start a subagent worker for an open workspace. The target can be a profile name returned by open_workspace or a built-in provider name. Returns immediately with a workerId; call wait_worker to collect the result. On macOS, workers are wrapped in the configured Seatbelt workspace sandbox by default; this reduces local authority but is not equivalent to a dedicated OS account or container.",
       inputSchema: {
         workspaceId: z.string().describe("Workspace identifier returned by open_workspace."),
         target: z.string().describe("Subagent profile name, built-in provider name, or existing worker id for a follow-up."),
@@ -2222,7 +2222,7 @@ export function createServer(
   const localAgentStore = createLocalAgentStore(config);
   const localAgentOrchestrator = createLocalAgentOrchestrator(config, localAgentStore);
   const reviewCheckpoints = createReviewCheckpointManager();
-  const processSessions = new ProcessSessionManager();
+  const processSessions = new ProcessSessionManager({ sandbox: config });
   const localAgentProviders = config.subagents
     ? getLocalAgentProviderAvailabilitySnapshot()
     : [];

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { loadConfig } from "./config.js";
 import { ensureDevspaceDefaultSkills, resolveSubagentsFlag } from "./user-config.js";
 
@@ -28,6 +28,18 @@ assert.equal(loadConfig(baseEnv).devspaceAgentsDir, join(emptyConfigDir, "agents
 assert.equal(loadConfig(baseEnv).subagents, false);
 assert.equal(loadConfig(baseEnv).artifactsEnabled, false);
 assert.equal(loadConfig(baseEnv).artifactMaxFileBytes, 100 * 1024 * 1024);
+assert.equal(loadConfig(baseEnv).macosSandbox, process.platform === "darwin");
+assert.equal(loadConfig({ ...baseEnv, DEVSPACE_MACOS_SANDBOX: "off" }).macosSandbox, false);
+assert.equal(loadConfig({ ...baseEnv, DEVSPACE_MACOS_SANDBOX: "workspace" }).macosSandbox, true);
+assert.equal(loadConfig(baseEnv).sandboxNetwork, true);
+assert.equal(loadConfig({ ...baseEnv, DEVSPACE_SANDBOX_NETWORK: "0" }).sandboxNetwork, false);
+assert.deepEqual(loadConfig({ ...baseEnv, DEVSPACE_SANDBOX_READ_PATHS: "./one,./two" }).sandboxReadPaths, [
+  resolve("./one"),
+  resolve("./two"),
+]);
+assert.deepEqual(loadConfig({ ...baseEnv, DEVSPACE_SANDBOX_WRITE_PATHS: "./out" }).sandboxWritePaths, [
+  resolve("./out"),
+]);
 assert.equal(loadConfig({ ...baseEnv, DEVSPACE_ARTIFACTS: "1" }).artifactsEnabled, true);
 assert.equal(
   loadConfig({ ...baseEnv, DEVSPACE_ARTIFACT_MAX_FILE_BYTES: "123" }).artifactMaxFileBytes,
@@ -198,3 +210,16 @@ assert.deepEqual(fileConfig.allowedHosts, [
   "::1",
   "devspace.example.com",
 ]);
+
+const workerConfigDir = mkdtempSync(join(tmpdir(), "devspace-worker-config-test-"));
+writeFileSync(
+  join(workerConfigDir, "config.json"),
+  JSON.stringify({ allowedRoots: [process.cwd()], subagents: true }),
+);
+writeFileSync(join(workerConfigDir, "auth.json"), "{not-json");
+const workerConfig = loadConfig({
+  DEVSPACE_CONFIG_DIR: workerConfigDir,
+  DEVSPACE_OAUTH_OWNER_TOKEN: "devspace-worker-placeholder-token",
+});
+assert.equal(workerConfig.oauth.ownerToken, "devspace-worker-placeholder-token");
+assert.equal(workerConfig.subagents, true);

@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { HeadTailBuffer, ProcessSessionManager } from "./process-sessions.js";
 
 const smallBuffer = new HeadTailBuffer(100);
@@ -214,4 +217,54 @@ try {
   }
 } finally {
   manager.shutdown();
+}
+
+if (process.platform === "darwin") {
+  const sandboxParent = await mkdtemp(join(homedir(), ".devspace-process-sandbox-test-"));
+  const sandboxWorkspace = join(sandboxParent, "workspace");
+  const outsideFile = join(sandboxParent, "outside.txt");
+  await mkdir(sandboxWorkspace);
+  await writeFile(join(sandboxWorkspace, "inside.txt"), "inside");
+  await writeFile(outsideFile, "outside");
+
+  const sandboxedManager = new ProcessSessionManager({
+    sandbox: {
+      macosSandbox: true,
+      sandboxNetwork: true,
+      sandboxReadPaths: [],
+      sandboxWritePaths: [],
+    },
+  });
+  try {
+    const inside = await sandboxedManager.start({
+      workspaceId: "sandbox-workspace",
+      workspaceRoot: sandboxWorkspace,
+      cwd: sandboxWorkspace,
+      command: `${node} -e "const fs=require('node:fs'); console.log(fs.readFileSync('inside.txt','utf8')); fs.writeFileSync('created.txt','ok')"`,
+      yieldTimeMs: 2_000,
+    });
+    assert.equal(inside.exitCode, 0);
+    assert.match(inside.output, /inside/);
+
+    const outsideRead = await sandboxedManager.start({
+      workspaceId: "sandbox-workspace",
+      workspaceRoot: sandboxWorkspace,
+      cwd: sandboxWorkspace,
+      command: `${node} -e "require('node:fs').readFileSync(${JSON.stringify(outsideFile)},'utf8')"`,
+      yieldTimeMs: 2_000,
+    });
+    assert.notEqual(outsideRead.exitCode, 0);
+
+    const outsideWrite = await sandboxedManager.start({
+      workspaceId: "sandbox-workspace",
+      workspaceRoot: sandboxWorkspace,
+      cwd: sandboxWorkspace,
+      command: `${node} -e "require('node:fs').writeFileSync(${JSON.stringify(outsideFile)},'changed')"`,
+      yieldTimeMs: 2_000,
+    });
+    assert.notEqual(outsideWrite.exitCode, 0);
+  } finally {
+    sandboxedManager.shutdown();
+    await rm(sandboxParent, { recursive: true, force: true });
+  }
 }

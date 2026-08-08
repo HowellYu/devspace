@@ -1,4 +1,6 @@
 import { spawn } from "node:child_process";
+import type { ServerConfig } from "./config.js";
+import { shouldUseMacosSandbox, wrapMacosSandboxCommand } from "./macos-sandbox.js";
 import { resolveShellCommand, terminateProcessTree } from "./process-platform.js";
 
 const DEFAULT_EXEC_YIELD_MS = 10_000;
@@ -69,6 +71,7 @@ interface ProcessSession {
 interface ProcessSessionManagerOptions {
   maxBufferCharacters?: number;
   completedSessionTtlMs?: number;
+  sandbox?: Pick<ServerConfig, "macosSandbox" | "sandboxNetwork" | "sandboxReadPaths" | "sandboxWritePaths">;
 }
 
 function boundedInteger(value: number | undefined, fallback: number, maximum: number): number {
@@ -215,11 +218,13 @@ export class ProcessSessionManager {
   private readonly sessions = new Map<number, ProcessSession>();
   private readonly maxBufferCharacters: number;
   private readonly completedSessionTtlMs: number;
+  private readonly sandbox?: ProcessSessionManagerOptions["sandbox"];
   private nextSessionId = 1;
 
   constructor(options: ProcessSessionManagerOptions = {}) {
     this.maxBufferCharacters = options.maxBufferCharacters ?? DEFAULT_BUFFER_CHARACTERS;
     this.completedSessionTtlMs = options.completedSessionTtlMs ?? COMPLETED_SESSION_TTL_MS;
+    this.sandbox = options.sandbox;
   }
 
   async start(input: StartCommandInput): Promise<ProcessSnapshot> {
@@ -323,9 +328,9 @@ export class ProcessSessionManager {
   }
 
   private startPipe(session: ProcessSession, input: StartCommandInput): void {
-    const shell = resolveShellCommand(input.command);
+    const shell = this.resolveProcessCommand(input);
     const detached = process.platform !== "win32";
-    const child = spawn(input.command, {
+    const child = spawn(shell.executable, shell.args, {
       cwd: input.cwd,
       env: processEnvironment({
         workspaceId: input.workspaceId,
@@ -334,7 +339,6 @@ export class ProcessSessionManager {
       stdio: "pipe",
       windowsHide: true,
       detached,
-      shell: shell.executable,
     });
 
     session.process = {
@@ -356,7 +360,7 @@ export class ProcessSessionManager {
       throw new Error("PTY support requires the optional node-pty dependency.");
     }
 
-    const shell = resolveShellCommand(input.command);
+    const shell = this.resolveProcessCommand(input);
     let pty: import("node-pty").IPty;
     try {
       pty = nodePty.spawn(shell.executable, shell.args, {
@@ -381,6 +385,17 @@ export class ProcessSessionManager {
     pty.onData((data) => this.append(session, data));
     pty.onExit(({ exitCode, signal }) => {
       this.finish(session, exitCode, signal === 0 ? undefined : String(signal));
+    });
+  }
+
+  private resolveProcessCommand(input: StartCommandInput): { executable: string; args: string[] } {
+    const shell = resolveShellCommand(input.command);
+    if (!this.sandbox || !input.workspaceRoot || !shouldUseMacosSandbox(this.sandbox)) return shell;
+    return wrapMacosSandboxCommand(shell, {
+      workspaceRoot: input.workspaceRoot,
+      readPaths: this.sandbox.sandboxReadPaths,
+      writePaths: this.sandbox.sandboxWritePaths,
+      allowNetwork: this.sandbox.sandboxNetwork,
     });
   }
 
