@@ -181,6 +181,13 @@ ACP providers (`cursor`, `copilot`, `luna`) resume stored provider sessions on
 follow-up runs through `session/load`. A failed load aborts the run rather
 than silently starting a new conversation.
 
+Workspace shells and subagents do not inherit the server's full environment.
+DevSpace forwards a small operational allowlist and provider executable-path
+overrides only. Secrets such as API keys, cloud credentials, database URLs, and
+`SSH_AUTH_SOCK` are excluded by default; provider credentials that need explicit
+forwarding should use the dedicated credential/grant mechanism rather than a
+broad environment passthrough.
+
 Legacy project paths such as `.pi/skills` can be added through `DEVSPACE_SKILL_PATHS` when needed.
 
 Example:

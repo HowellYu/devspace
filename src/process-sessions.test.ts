@@ -61,6 +61,25 @@ const environment = await manager.start({
 assert.equal(environment.running, false);
 assert.match(environment.output, /1,dumb,cat,cat,cat,1,workspace-a,\/tmp\/devspace-workspace-a/);
 
+process.env.DEVSPACE_TEST_SECRET = "do-not-leak";
+process.env.OPENAI_API_KEY = "do-not-leak";
+process.env.SSH_AUTH_SOCK = "/tmp/do-not-leak.sock";
+try {
+  const isolatedEnvironment = await manager.start({
+    workspaceId: "workspace-a",
+    workspaceRoot: "/tmp/devspace-workspace-a",
+    cwd: process.cwd(),
+    command: `${node} -e "console.log([process.env.DEVSPACE_TEST_SECRET, process.env.OPENAI_API_KEY, process.env.SSH_AUTH_SOCK].map(value => value ?? 'missing').join(','))"`,
+    yieldTimeMs: 2_000,
+  });
+  assert.equal(isolatedEnvironment.running, false);
+  assert.match(isolatedEnvironment.output, /missing,missing,missing/);
+} finally {
+  delete process.env.DEVSPACE_TEST_SECRET;
+  delete process.env.OPENAI_API_KEY;
+  delete process.env.SSH_AUTH_SOCK;
+}
+
 const background = await manager.start({
   workspaceId: "workspace-a",
   cwd: process.cwd(),

@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import type { ServerConfig } from "./config.js";
 import { shouldUseMacosSandbox, wrapMacosSandboxCommand } from "./macos-sandbox.js";
+import { buildSafeChildEnvironment } from "./process-environment.js";
 import { resolveShellCommand, terminateProcessTree } from "./process-platform.js";
 
 const DEFAULT_EXEC_YIELD_MS = 10_000;
@@ -93,22 +94,21 @@ function terminalSize(value: number | undefined, fallback: number): number {
 function processEnvironment(input?: {
   workspaceId?: string;
   workspaceRoot?: string;
-}): Record<string, string> {
-  return {
-    ...Object.fromEntries(
-      Object.entries(process.env).filter((entry): entry is [string, string] => entry[1] !== undefined),
-    ),
-    NO_COLOR: "1",
-    TERM: "dumb",
-    PAGER: "cat",
-    GIT_PAGER: "cat",
-    GH_PAGER: "cat",
-    CODEX_CI: "1",
-    LANG: process.env.LANG ?? "C.UTF-8",
-    LC_ALL: process.env.LC_ALL ?? "C.UTF-8",
-    ...(input?.workspaceId ? { DEVSPACE_WORKSPACE_ID: input.workspaceId } : {}),
-    ...(input?.workspaceRoot ? { DEVSPACE_WORKSPACE_ROOT: input.workspaceRoot } : {}),
-  };
+}): NodeJS.ProcessEnv {
+  return buildSafeChildEnvironment({
+    extra: {
+      NO_COLOR: "1",
+      TERM: "dumb",
+      PAGER: "cat",
+      GIT_PAGER: "cat",
+      GH_PAGER: "cat",
+      CODEX_CI: "1",
+      LANG: process.env.LANG ?? "C.UTF-8",
+      LC_ALL: process.env.LC_ALL ?? "C.UTF-8",
+      DEVSPACE_WORKSPACE_ID: input?.workspaceId,
+      DEVSPACE_WORKSPACE_ROOT: input?.workspaceRoot,
+    },
+  });
 }
 
 function codePointLength(value: string): number {

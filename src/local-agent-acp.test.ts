@@ -45,10 +45,10 @@ if (process.platform !== "win32") {
 
   const savedEnv = { ...process.env };
   process.env.CURSOR_COMMAND = shimPath;
-  process.env.FAKE_ACP_STORE = storePath;
-  process.env.FAKE_ACP_EVENTS = eventsPath;
-  delete process.env.FAKE_ACP_STDERR;
-  delete process.env.FAKE_ACP_CONFIG_OPTIONS;
+  const childEnvironment: NodeJS.ProcessEnv = {
+    FAKE_ACP_STORE: storePath,
+    FAKE_ACP_EVENTS: eventsPath,
+  };
 
   const readStore = () => JSON.parse(readFileSync(storePath, "utf8"));
 
@@ -61,7 +61,7 @@ if (process.platform !== "win32") {
     throw new Error(`timed out waiting for fake agent event: ${text}`);
   }
 
-  const adapter = createLocalAgentAdapter("cursor");
+  const adapter = createLocalAgentAdapter("cursor", { childEnvironment });
 
   try {
     // 1. A new run uses session/new and returns the provider session id.
@@ -96,7 +96,7 @@ if (process.platform !== "win32") {
 
     // 3. A failed load reports the session id, includes provider stderr, and
     //    never silently creates a fresh session.
-    process.env.FAKE_ACP_STDERR = "fake diagnostic output";
+    childEnvironment.FAKE_ACP_STDERR = "fake diagnostic output";
     await assert.rejects(
       adapter.run({
         prompt: "continue",
@@ -111,7 +111,7 @@ if (process.platform !== "win32") {
         return true;
       },
     );
-    delete process.env.FAKE_ACP_STDERR;
+    delete childEnvironment.FAKE_ACP_STDERR;
     {
       const store = readStore();
       assert.equal(store.newCalls, 1);
@@ -119,7 +119,7 @@ if (process.platform !== "win32") {
     }
 
     // 4. Model and thinking config options resolve on a loaded session.
-    process.env.FAKE_ACP_CONFIG_OPTIONS = JSON.stringify([
+    childEnvironment.FAKE_ACP_CONFIG_OPTIONS = JSON.stringify([
       {
         type: "select",
         id: "model",
@@ -148,7 +148,7 @@ if (process.platform !== "win32") {
         { sessionId: "fake-session-1", configId: "effort", value: "xhigh" },
       ]);
     }
-    delete process.env.FAKE_ACP_CONFIG_OPTIONS;
+    delete childEnvironment.FAKE_ACP_CONFIG_OPTIONS;
 
     // 5. The child process is terminated after each run.
     await waitForEvent("sigterm");
@@ -176,10 +176,11 @@ if (process.platform !== "win32") {
     chmodSync(lunaShim, 0o755);
 
     process.env.LUNA_COMMAND = lunaShim;
-    process.env.FAKE_ACP_STORE = lunaStorePath;
-    delete process.env.FAKE_ACP_EVENTS;
+    const lunaChildEnvironment: NodeJS.ProcessEnv = {
+      FAKE_ACP_STORE: lunaStorePath,
+    };
     try {
-      const luna = createLocalAgentAdapter("luna");
+      const luna = createLocalAgentAdapter("luna", { childEnvironment: lunaChildEnvironment });
       assert.equal(luna.provider, "luna");
 
       const first = await luna.run({
@@ -201,7 +202,6 @@ if (process.platform !== "win32") {
       assert.equal(store.loadCalls, 1);
     } finally {
       delete process.env.LUNA_COMMAND;
-      delete process.env.FAKE_ACP_STORE;
       rmSync(lunaSandbox, { recursive: true, force: true });
     }
   }

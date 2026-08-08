@@ -200,12 +200,16 @@ assert.throws(
     CLAUDE_CODE_SSE_PORT: "1234",
     CLAUDE_AGENT_SDK_VERSION: "test",
     PATH: "/usr/bin",
+    ANTHROPIC_API_KEY: "do-not-leak",
+    SSH_AUTH_SOCK: "/tmp/do-not-leak.sock",
   });
 
   assert.equal(env.CLAUDECODE, undefined);
   assert.equal(env.CLAUDE_CODE_ENTRYPOINT, undefined);
   assert.equal(env.CLAUDE_CODE_SSE_PORT, undefined);
   assert.equal(env.CLAUDE_AGENT_SDK_VERSION, undefined);
+  assert.equal(env.ANTHROPIC_API_KEY, undefined);
+  assert.equal(env.SSH_AUTH_SOCK, undefined);
   assert.equal(env.PATH, "/usr/bin");
 }
 

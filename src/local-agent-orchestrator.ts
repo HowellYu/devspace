@@ -33,6 +33,7 @@ import {
 import type { LocalAgentRunInput, LocalAgentRunResult } from "./local-agent-runtime.js";
 import type { ReviewCheckpointManager } from "./review-checkpoints.js";
 import { resolveDevspaceCliPath } from "./service.js";
+import { buildSafeChildEnvironment } from "./process-environment.js";
 import type { ServerConfig } from "./config.js";
 
 export interface StartWorkerInput {
@@ -431,10 +432,12 @@ function defaultSpawnWorker(config: ServerConfig, record: LocalAgentRecord, prom
   const child = spawn(command.executable, command.args, {
     detached: true,
     stdio: "ignore",
-    env: {
-      ...process.env,
-      DEVSPACE_OAUTH_OWNER_TOKEN: "devspace-worker-placeholder-token",
-    },
+    env: buildSafeChildEnvironment({
+      includeProviderCommands: true,
+      extra: {
+        DEVSPACE_OAUTH_OWNER_TOKEN: "devspace-worker-placeholder-token",
+      },
+    }),
   });
   child.unref();
   return child;

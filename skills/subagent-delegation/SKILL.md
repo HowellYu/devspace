@@ -86,12 +86,13 @@ availability, local listener health, and the public URL reachability advisory.
 On macOS, DevSpace enables a Seatbelt (`sandbox-exec`) workspace sandbox for
 workspace shells and detached worker processes by default. Treat this as a
 risk-reduction boundary, not a complete security guarantee: provider auth/config
-reads and inherited child-process permissions may still require narrowly scoped
-exceptions, and Apple has deprecated `sandbox-exec`. Extra paths must be explicit
-through `DEVSPACE_SANDBOX_READ_PATHS` or `DEVSPACE_SANDBOX_WRITE_PATHS`; do not
-broaden them silently. For the strongest isolation, recommend a dedicated,
-non-administrator OS account with filesystem permissions only for intended
-projects and DevSpace state.
+reads may still require narrowly scoped exceptions, and Apple has deprecated
+`sandbox-exec`. Child environments are default-deny and do not inherit arbitrary
+API keys, cloud credentials, database URLs, or `SSH_AUTH_SOCK` from DevSpace.
+Extra filesystem paths must be explicit through the supported grant/config
+surface; do not broaden them silently. For the strongest isolation, recommend a
+dedicated, non-administrator OS account with filesystem permissions only for
+intended projects and DevSpace state.
 
 ## Choosing a profile
 

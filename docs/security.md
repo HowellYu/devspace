@@ -145,6 +145,15 @@ configurable up to 7200 seconds). Overlong workers are terminated and recorded a
 `timed_out`; inspection/wait also reconcile persisted running workers against the
 recorded process id so vanished workers do not remain `running` indefinitely.
 
+Remote shell sessions and subagent processes also use a default-deny child
+environment. DevSpace forwards only basic process metadata (`PATH`, home/temp,
+locale, shell/user), explicitly supported DevSpace operational variables, and
+provider executable-path overrides when needed. It does **not** implicitly
+forward `SSH_AUTH_SOCK`, cloud credentials, API keys, database URLs, or arbitrary
+parent-process environment variables. A provider that genuinely requires a
+credential must receive it through an explicit credential/grant mechanism rather
+than widening the global child environment.
+
 ## Logs
 
 By default, DevSpace logs requests and tool calls. Shell command previews are

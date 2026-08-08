@@ -5,6 +5,7 @@ import type { EffortLevel } from "@anthropic-ai/claude-agent-sdk";
 import type { ActiveSession, ClientContext } from "@agentclientprotocol/sdk";
 import type { LocalAgentProvider } from "./local-agent-profiles.js";
 import { removeDevspaceNodeModulesBinFromPath } from "./local-agent-path.js";
+import { buildSafeChildEnvironment } from "./process-environment.js";
 import {
   createCodexSdkLocalAgentRuntime,
   type LocalAgentRunInput,
@@ -14,6 +15,11 @@ import {
 export interface LocalAgentAdapter {
   readonly provider: LocalAgentProvider;
   run(input: LocalAgentRunInput): Promise<LocalAgentRunResult>;
+}
+
+export interface LocalAgentAdapterOptions {
+  /** Explicit child-only environment additions for controlled integrations/tests. */
+  childEnvironment?: NodeJS.ProcessEnv;
 }
 
 export type AcpLocalAgentProvider = "cursor" | "copilot" | "luna";
@@ -61,7 +67,10 @@ export async function runLocalAgentProvider(
   return createLocalAgentAdapter(provider).run(input);
 }
 
-export function createLocalAgentAdapter(provider: LocalAgentProvider): LocalAgentAdapter {
+export function createLocalAgentAdapter(
+  provider: LocalAgentProvider,
+  options: LocalAgentAdapterOptions = {},
+): LocalAgentAdapter {
   switch (provider) {
     case "codex":
       return new CodexLocalAgentAdapter();
@@ -74,7 +83,7 @@ export function createLocalAgentAdapter(provider: LocalAgentProvider): LocalAgen
     case "cursor":
     case "copilot":
     case "luna":
-      return new AcpLocalAgentAdapter(provider);
+      return new AcpLocalAgentAdapter(provider, options.childEnvironment);
   }
 }
 
@@ -160,16 +169,10 @@ function resolveExecutable(command: string): string | undefined {
 }
 
 export function claudeCommandEnvironment(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
-  const next = { ...env };
-  for (const key of [
-    "CLAUDECODE",
-    "CLAUDE_CODE_ENTRYPOINT",
-    "CLAUDE_CODE_SSE_PORT",
-    "CLAUDE_AGENT_SDK_VERSION",
-  ]) {
-    delete next[key];
-  }
-  return next;
+  return buildSafeChildEnvironment({
+    source: env,
+    includeProviderCommands: true,
+  });
 }
 
 class OpencodeLocalAgentAdapter implements LocalAgentAdapter {
@@ -200,7 +203,10 @@ class OpencodeLocalAgentAdapter implements LocalAgentAdapter {
 }
 
 class AcpLocalAgentAdapter implements LocalAgentAdapter {
-  constructor(readonly provider: AcpLocalAgentProvider) {}
+  constructor(
+    readonly provider: AcpLocalAgentProvider,
+    private readonly childEnvironment?: NodeJS.ProcessEnv,
+  ) {}
 
   async run(input: LocalAgentRunInput): Promise<LocalAgentRunResult> {
     const { client } = await import("@agentclientprotocol/sdk");
@@ -209,7 +215,10 @@ class AcpLocalAgentAdapter implements LocalAgentAdapter {
     const [command, ...args] = acpCommandFor(this.provider);
     const child = spawn(command, args, {
       cwd: input.workspace,
-      env: process.env,
+      env: buildSafeChildEnvironment({
+        includeProviderCommands: true,
+        extra: this.childEnvironment,
+      }),
       stdio: ["pipe", "pipe", "pipe"],
       windowsHide: true,
     });
@@ -462,12 +471,16 @@ class PiRpcLocalAgentAdapter implements LocalAgentAdapter {
 }
 
 export function piCommandEnvironment(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
-  if (env.PI_COMMAND) return env;
-  const path = env.PATH;
-  if (!path) return env;
+  const next = buildSafeChildEnvironment({
+    source: env,
+    includeProviderCommands: true,
+  });
+  if (next.PI_COMMAND) return next;
+  const path = next.PATH;
+  if (!path) return next;
 
   return {
-    ...env,
+    ...next,
     PATH: removeDevspaceNodeModulesBinFromPath(path),
   };
 }
