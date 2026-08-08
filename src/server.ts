@@ -50,6 +50,10 @@ import {
 } from "./mcp-sessions.js";
 import { ProcessSessionManager, type ProcessSnapshot } from "./process-sessions.js";
 import { createReviewCheckpointManager } from "./review-checkpoints.js";
+import {
+  createProjectMemoryManager,
+  type ProjectMemoryManager,
+} from "./project-memory.js";
 import { openAiConversationScopeId } from "./request-meta.js";
 import { shutdownHttpServer } from "./server-shutdown.js";
 import { formatPathForPrompt } from "./skills.js";
@@ -173,6 +177,9 @@ const toolNames = {
   glob: "glob",
   ls: "ls",
   shell: "bash",
+  readProjectMemory: "read_project_memory",
+  writeProjectMemory: "write_project_memory",
+  listProjectMemory: "list_project_memory",
 } as const;
 
 interface ToolLogFields {
@@ -197,7 +204,7 @@ function serverInstructions(config: ServerConfig): string {
       : "";
 
   if (config.toolMode === "codex") {
-    return `Use DevSpace as a local coding workspace. Call ${toolNames.openWorkspace} once per project folder or worktree and reuse its workspaceId. Open it again when the workspaceId is invalid, the project changes, checkout/worktree mode changes, or another isolated worktree is needed. Use ${toolNames.read} for direct file reads, apply_patch for all file modifications, exec_command for inspection, tests, builds, and other commands, and write_stdin to poll or interact with running processes. Follow instructions returned by ${toolNames.openWorkspace}; read applicable instruction and skill files before working in their scope.${artifactInstruction}${showChangesInstruction}`;
+    return `Use DevSpace as a local coding workspace. Call ${toolNames.openWorkspace} once per project folder or worktree and reuse its workspaceId. Open it again when the workspaceId is invalid, the project changes, checkout/worktree mode changes, or another isolated worktree is needed. Use ${toolNames.read} for direct file reads, apply_patch for all file modifications, exec_command for inspection, tests, builds, and other commands, and write_stdin to poll or interact with running processes. Use ${toolNames.listProjectMemory}, ${toolNames.readProjectMemory}, and ${toolNames.writeProjectMemory} to access durable project memory across sessions; memory is stored outside the repo under DevSpace state and is only for durable project facts, decisions, and checkpoints. Follow instructions returned by ${toolNames.openWorkspace}; read applicable instruction and skill files before working in their scope.${artifactInstruction}${showChangesInstruction}`;
   }
 
   const inspection = config.toolMode !== "full"
@@ -210,7 +217,9 @@ function serverInstructions(config: ServerConfig): string {
 
   const agentsMd = `Follow instructions returned by ${toolNames.openWorkspace}. Before working under a path listed in availableAgentsFiles, use ${toolNames.read} to inspect that instruction file and follow it. `;
 
-  return `Use DevSpace as a local coding workspace. Call ${toolNames.openWorkspace} once per project folder or worktree to obtain a workspaceId. Reuse that same workspaceId for all later file, search, edit, write, show-changes, and shell tools in that folder; do not call ${toolNames.openWorkspace} again unless switching to a different project folder, changing checkout/worktree mode, the workspaceId is rejected as unknown, or a new isolated worktree is requested. ${agentsMd}${skills}${inspection}Prefer ${toolNames.edit} for targeted modifications, ${toolNames.write} only for new files or complete rewrites, and ${toolNames.shell} for tests, builds, git inspection, package scripts, and commands that are better executed by the shell. Do not create or modify files with ${toolNames.shell}; avoid shell redirection, heredocs, tee, sed -i, perl -i, node/python/ruby scripts, or any command whose purpose is to write project files.${artifactInstruction}${showChangesInstruction}`;
+  const memory = `Project memory is durable across sessions for the same project root. Use ${toolNames.listProjectMemory} to see existing memory files, ${toolNames.readProjectMemory} to read one, and ${toolNames.writeProjectMemory} to create or overwrite one. Memory is stored outside the repo under DevSpace state and is only for durable project facts, decisions, and checkpoints; do not store secrets or transient chain-of-thought there.`;
+
+  return `Use DevSpace as a local coding workspace. Call ${toolNames.openWorkspace} once per project folder or worktree to obtain a workspaceId. Reuse that same workspaceId for all later file, search, edit, write, show-changes, shell, and memory tools in that folder; do not call ${toolNames.openWorkspace} again unless switching to a different project folder, changing checkout/worktree mode, the workspaceId is rejected as unknown, or a new isolated worktree is requested. ${agentsMd}${skills}${memory} ${inspection}Prefer ${toolNames.edit} for targeted modifications, ${toolNames.write} only for new files or complete rewrites, and ${toolNames.shell} for tests, builds, git inspection, package scripts, and commands that are better executed by the shell. Do not create or modify files with ${toolNames.shell}; avoid shell redirection, heredocs, tee, sed -i, perl -i, node/python/ruby scripts, or any command whose purpose is to write project files.${artifactInstruction}${showChangesInstruction}`;
 }
 
 function formatVisibleAgent(agent: {
@@ -701,7 +710,9 @@ export function createMcpServer(
   processSessions: ProcessSessionManager,
   localAgentProviders: LocalAgentProviderAvailability[],
   incomingArtifactAdapters: readonly IncomingArtifactAdapter[],
+  memoryManager?: ProjectMemoryManager,
 ): McpServer {
+  const memory = memoryManager ?? createProjectMemoryManager(config.stateDir);
   const server = new McpServer(
     {
       name: "devspace",
@@ -791,6 +802,8 @@ export function createMcpServer(
         agentProviders: z.array(workspaceLocalAgentProviderOutputSchema).optional(),
         agents: z.array(workspaceLocalAgentOutputSchema).optional(),
         skillDiagnostics: z.array(z.unknown()).optional(),
+        memoryNamespace: z.string().describe("Opaque stable identifier for this project's memory namespace."),
+        memoryFiles: z.array(z.string()).describe("Names of durable memory files already stored for this project."),
         instruction: z.string(),
       },
       ...toolWidgetDescriptorMeta(config, "workspace"),
@@ -838,6 +851,8 @@ export function createMcpServer(
       const cardAvailableAgentsFiles = availableAgentsFiles.map((file) => ({
         path: formatAgentsPath(file.path, workspace.root),
       }));
+      const memoryFiles = await memory.listFiles(workspaces.memoryRoot(workspace));
+      const memoryNamespace = workspaces.memoryNamespaceId(workspace);
       const visibleSkills = includeBootstrapContext ? cardSkills : [];
       const visibleAgentProviders = includeBootstrapContext ? cardAgentProviders : [];
       const visibleAgents = includeBootstrapContext ? cardAgents : [];
@@ -884,6 +899,9 @@ export function createMcpServer(
             visibleAgents.length > 0
               ? `Available subagent profiles: ${visibleAgents.map(formatVisibleAgent).join(", ")}`
               : undefined,
+            memoryFiles.length > 0
+              ? `Project memory: ${memoryFiles.map((file) => file.file).join(", ")}`
+              : undefined,
             instruction,
           ].filter(Boolean).join("\n"),
         },
@@ -914,6 +932,8 @@ export function createMcpServer(
             skills: cardSkills,
             agentProviders: cardAgentProviders,
             agents: cardAgents,
+            memoryNamespace,
+            memoryFiles,
             instruction: cardInstruction,
             summary: {
               mode: workspace.mode,
@@ -922,6 +942,7 @@ export function createMcpServer(
               skills: cardSkills.length,
               agentProviders: cardAgentProviders.length,
               agents: cardAgents.length,
+              memoryFiles: memoryFiles.length,
             },
           },
         },
@@ -941,8 +962,161 @@ export function createMcpServer(
                 skillDiagnostics: workspace.skillDiagnostics,
               }
             : {}),
+          memoryNamespace,
+          memoryFiles: memoryFiles.map((file) => file.file),
           instruction,
         },
+      };
+    },
+  );
+
+  registerAppTool(
+    server,
+    toolNames.readProjectMemory,
+    {
+      title: "Read project memory",
+      description:
+        "Read a durable project memory file for an open workspace. Memory is scoped to the canonical project root, stored outside the repo under DevSpace state, and persists across sessions. Use for decisions.md, progress.md, next-steps.md, or equivalent concise durable artifacts. Call open_workspace first and pass workspaceId.",
+      inputSchema: {
+        workspaceId: z.string().describe("Workspace identifier returned by open_workspace."),
+        file: z.string().describe("Memory file name, such as decisions.md, progress.md, or next-steps.md."),
+      },
+      outputSchema: resultOutputSchema(),
+      ...toolWidgetDescriptorMeta(config, "read"),
+      annotations: { readOnlyHint: true },
+    },
+    async ({ workspaceId, file }) => {
+      const startedAt = performance.now();
+      const workspace = workspaces.getWorkspace(workspaceId);
+      const content = await memory.readFile(workspaces.memoryRoot(workspace), file);
+
+      if (content === undefined) {
+        const message = `Memory file not found: ${file}`;
+        logToolCall(config, {
+          tool: toolNames.readProjectMemory,
+          workspaceId,
+          path: file,
+          success: false,
+          durationMs: Math.round(performance.now() - startedAt),
+        });
+        return {
+          content: [{ type: "text" as const, text: message }],
+          isError: true,
+        };
+      }
+
+      logToolCall(config, {
+        tool: toolNames.readProjectMemory,
+        workspaceId,
+        path: file,
+        success: true,
+        durationMs: Math.round(performance.now() - startedAt),
+      });
+
+      return {
+        content: [{ type: "text" as const, text: content }],
+        _meta: {
+          tool: toolNames.readProjectMemory,
+          card: {
+            workspaceId,
+            path: file,
+            summary: textSummary([{ type: "text", text: content }]),
+            payload: { content: [{ type: "text", text: content }] },
+          },
+        },
+        structuredContent: { result: content },
+      };
+    },
+  );
+
+  registerAppTool(
+    server,
+    toolNames.writeProjectMemory,
+    {
+      title: "Write project memory",
+      description:
+        "Create or overwrite a durable project memory file for an open workspace. Use for concise durable artifacts such as decisions.md, progress.md, or next-steps.md. Memory is stored outside the repo under DevSpace state and is only for durable project facts, decisions, and checkpoints; do not store secrets, credentials, or transient chain-of-thought there.",
+      inputSchema: {
+        workspaceId: z.string().describe("Workspace identifier returned by open_workspace."),
+        file: z.string().describe("Memory file name, such as decisions.md, progress.md, or next-steps.md."),
+        content: z.string().describe("Complete new memory file content."),
+      },
+      outputSchema: resultOutputSchema(),
+      ...toolWidgetDescriptorMeta(config, "write"),
+      annotations: WRITE_TOOL_ANNOTATIONS,
+    },
+    async ({ workspaceId, file, content }) => {
+      const startedAt = performance.now();
+      const workspace = workspaces.getWorkspace(workspaceId);
+      await memory.writeFile(workspaces.memoryRoot(workspace), file, content);
+      const result = `Wrote project memory file ${file}.`;
+
+      logToolCall(config, {
+        tool: toolNames.writeProjectMemory,
+        workspaceId,
+        path: file,
+        success: true,
+        durationMs: Math.round(performance.now() - startedAt),
+      });
+
+      return {
+        content: [{ type: "text" as const, text: result }],
+        _meta: {
+          tool: toolNames.writeProjectMemory,
+          card: {
+            workspaceId,
+            path: file,
+            summary: {
+              lines: contentLineCount(content),
+              characters: content.length,
+            },
+            payload: { content: [{ type: "text", text: result }] },
+          },
+        },
+        structuredContent: { result },
+      };
+    },
+  );
+
+  registerAppTool(
+    server,
+    toolNames.listProjectMemory,
+    {
+      title: "List project memory",
+      description:
+        "List durable project memory files for an open workspace. Memory is scoped to the canonical project root and persists across sessions. Call open_workspace first and pass workspaceId.",
+      inputSchema: {
+        workspaceId: z.string().describe("Workspace identifier returned by open_workspace."),
+      },
+      outputSchema: resultOutputSchema({ files: z.array(z.string()) }),
+      ...toolWidgetDescriptorMeta(config, "directory"),
+      annotations: { readOnlyHint: true },
+    },
+    async ({ workspaceId }) => {
+      const startedAt = performance.now();
+      const workspace = workspaces.getWorkspace(workspaceId);
+      const files = await memory.listFiles(workspaces.memoryRoot(workspace));
+      const names = files.map((file) => file.file);
+      const result = names.length > 0 ? names.join("\n") : "No project memory files.";
+
+      logToolCall(config, {
+        tool: toolNames.listProjectMemory,
+        workspaceId,
+        success: true,
+        durationMs: Math.round(performance.now() - startedAt),
+      });
+
+      return {
+        content: [{ type: "text" as const, text: result }],
+        _meta: {
+          tool: toolNames.listProjectMemory,
+          card: {
+            workspaceId,
+            summary: { files: names.length },
+            payload: { files: names },
+          },
+        },
+        structuredContent: { result, files: names },
       };
     },
   );
@@ -1678,7 +1852,7 @@ export function createServer(
   const transports = new McpSessionRegistry<Transport>();
   const mcpUrl = new URL("/mcp", config.publicBaseUrl);
   const resourceServerUrl = resourceUrlFromServerUrl(mcpUrl);
-  const oauthProvider = new SingleUserOAuthProvider(config.oauth, mcpUrl, config.stateDir);
+  const oauthProvider = new SingleUserOAuthProvider(config.oauth, mcpUrl, config.stateDir, config.publicBaseUrl, config.logging.trustProxy);
   const bearerAuth = requireBearerAuth({
     verifier: oauthProvider,
     requiredScopes: [config.oauth.scopes[0] ?? "devspace"],
@@ -1777,7 +1951,7 @@ export function createServer(
   );
 
   app.get("/healthz", (_req, res) => {
-    res.json({ ok: true, name: "devspace" });
+    res.json({ status: "ok" });
   });
 
   app.all("/mcp", async (req, res) => {

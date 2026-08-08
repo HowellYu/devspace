@@ -184,6 +184,36 @@ Set `DEVSPACE_SKILLS=0` to hide skills from workspace output. Set
 workflow. The catalog comes from `open_workspace`; `devspace agents ls` lists
 existing subagent sessions for that workspace.
 
+## Project Memory
+
+DevSpace keeps a small durable project memory store scoped to each canonical
+project root. It lives under `DEVSPACE_STATE_DIR` (default
+`~/.local/share/devspace/memory/`), not inside the repo by default, so it
+survives server restarts and new ChatGPT sessions for the same project can
+read it.
+
+Use these tools to access memory:
+
+- `list_project_memory({ workspaceId })`
+- `read_project_memory({ workspaceId, file })`
+- `write_project_memory({ workspaceId, file, content })`
+
+Well-known memory file names:
+
+- `decisions.md` — durable project decisions and rationale.
+- `progress.md` — current progress and completed milestones.
+- `next-steps.md` — pending work and next checkpoints.
+
+`open_workspace` returns the existing `memoryFiles` for the project so new
+sessions can discover prior memory without extra calls. Memory namespaces are
+stable for the same canonical root, so checkout and worktree modes for the same
+project share the same memory.
+
+Memory is only for durable project facts, decisions, and checkpoints. Do not
+store secrets, credentials, owner passwords, or transient chain-of-thought
+there. File names are validated: they must end with `.md`, contain no path
+separators, and must not be hidden.
+
 ## Tool Names
 
 DevSpace exposes these tool names:

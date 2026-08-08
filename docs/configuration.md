@@ -24,6 +24,8 @@ npx @waishnav/devspace serve
 npx @waishnav/devspace doctor
 npx @waishnav/devspace config get
 npx @waishnav/devspace config set publicBaseUrl https://devspace.example.com
+npx @waishnav/devspace service install    # macOS only
+npx @waishnav/devspace service uninstall  # macOS only
 ```
 
 ## Core Environment Variables
@@ -197,6 +199,56 @@ Set `DEVSPACE_LOG_FORMAT=pretty` for local debugging.
 
 Set `DEVSPACE_LOG_SHELL_COMMANDS=1` only when you intentionally want command
 previews in logs.
+
+## macOS Always-On Service
+
+On macOS, `devspace service install` creates a user LaunchAgent that starts
+DevSpace at login and keeps it alive with a throttled restart interval. The
+LaunchAgent runs:
+
+```text
+<resolved-devspace-binary> serve
+```
+
+Logs are written to `~/.devspace/logs`.
+
+The generated LaunchAgent does **not** contain your Owner password or any
+credentials. Operational environment variables such as `LUNA_COMMAND` are only
+included if they are explicitly set when you run `devspace service install`.
+DevSpace reads the Owner password from `~/.devspace/auth.json` at runtime, so
+keep that file readable only by your user.
+
+To install the LaunchAgent without immediately starting it — for example, when
+a foreground DevSpace server is already running on port 7676 — pass
+`--no-start`:
+
+```bash
+npx @waishnav/devspace service install --no-start
+```
+
+This writes and validates the plist, but skips `launchctl load` and
+`launchctl start`. Load it later with:
+
+```bash
+launchctl load ~/Library/LaunchAgents/dev.devspace.agent.plist
+```
+
+To remove the service:
+
+```bash
+npx @waishnav/devspace service uninstall
+```
+
+## Public Tunnels
+
+- **Tailscale Funnel** exposes DevSpace to the public internet. Use it when you
+  want ChatGPT or another remote host to reach this machine from anywhere.
+- **Tailscale Serve** makes DevSpace available only on the tailnet. Use it when
+  you only need access from devices on your Tailscale network.
+
+DevSpace does not start, stop, or configure Tailscale. Set up your tunnel
+separately, then point it at `http://127.0.0.1:7676` and put the public origin in
+`DEVSPACE_PUBLIC_BASE_URL`.
 
 ## Env-Only Example
 

@@ -13,10 +13,67 @@ export interface LocalAgentProviderAvailability {
   reason?: string;
 }
 
+export interface LocalAgentProviderAvailabilityCacheOptions {
+  ttlMs?: number;
+}
+
+export interface LocalAgentProviderAvailabilitySnapshotOptions {
+  env?: NodeJS.ProcessEnv;
+  refresh?: boolean;
+}
+
+const DEFAULT_AVAILABILITY_TTL_MS = 60_000;
+
+export class LocalAgentProviderAvailabilityCache {
+  private cachedAt = 0;
+  private cached: LocalAgentProviderAvailability[] = [];
+  private env: NodeJS.ProcessEnv | undefined;
+
+  constructor(private readonly ttlMs: number = DEFAULT_AVAILABILITY_TTL_MS) {}
+
+  snapshot(
+    env: NodeJS.ProcessEnv = process.env,
+    options: { refresh?: boolean } = {},
+  ): LocalAgentProviderAvailability[] {
+    const now = Date.now();
+    if (!options.refresh && this.cachedAt > 0 && now - this.cachedAt < this.ttlMs && env === this.env) {
+      return this.cached;
+    }
+
+    this.env = env;
+    this.cachedAt = now;
+    this.cached = LOCAL_AGENT_PROVIDERS.map((provider) => checkLocalAgentProviderAvailability(provider, env));
+    return this.cached;
+  }
+
+  refresh(env: NodeJS.ProcessEnv = process.env): LocalAgentProviderAvailability[] {
+    return this.snapshot(env, { refresh: true });
+  }
+
+  clear(): void {
+    this.cachedAt = 0;
+    this.cached = [];
+    this.env = undefined;
+  }
+}
+
+const defaultAvailabilityCache = new LocalAgentProviderAvailabilityCache();
+
 export function getLocalAgentProviderAvailabilitySnapshot(
   env: NodeJS.ProcessEnv = process.env,
+  options: { refresh?: boolean } = {},
 ): LocalAgentProviderAvailability[] {
-  return LOCAL_AGENT_PROVIDERS.map((provider) => checkLocalAgentProviderAvailability(provider, env));
+  return defaultAvailabilityCache.snapshot(env, options);
+}
+
+export function refreshLocalAgentProviderAvailabilitySnapshot(
+  env: NodeJS.ProcessEnv = process.env,
+): LocalAgentProviderAvailability[] {
+  return defaultAvailabilityCache.refresh(env);
+}
+
+export function clearLocalAgentProviderAvailabilityCache(): void {
+  defaultAvailabilityCache.clear();
 }
 
 export function checkLocalAgentProviderAvailability(
@@ -37,7 +94,7 @@ export function checkLocalAgentProviderAvailability(
     case "cursor":
     case "copilot":
     case "luna":
-      return commandAvailability(provider, acpCommandFor(provider, env)[0]);
+      return commandAvailability(provider, acpCommandFor(provider, env)[0], { env });
   }
 }
 

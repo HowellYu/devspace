@@ -185,7 +185,7 @@ function testTransactionalTokenRotation(stateDir: string): void {
 }
 
 async function testProviderRestartRotationAndRevocation(stateDir: string): Promise<void> {
-  const firstProvider = new SingleUserOAuthProvider(oauthConfig, mcpUrl, stateDir);
+  const firstProvider = new SingleUserOAuthProvider(oauthConfig, mcpUrl, stateDir, mcpUrl.origin, false);
   const client = await firstProvider.clientsStore.registerClient?.({
     redirect_uris: [redirectUri],
     client_name: "ChatGPT",
@@ -213,7 +213,7 @@ async function testProviderRestartRotationAndRevocation(stateDir: string): Promi
   assert.ok(issued.refresh_token);
   firstProvider.close();
 
-  const secondProvider = new SingleUserOAuthProvider(oauthConfig, mcpUrl, stateDir);
+  const secondProvider = new SingleUserOAuthProvider(oauthConfig, mcpUrl, stateDir, mcpUrl.origin, false);
   try {
     const verified = await secondProvider.verifyAccessToken(issued.access_token);
     assert.equal(verified.clientId, client.client_id);

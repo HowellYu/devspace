@@ -8,9 +8,16 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import * as prompts from "@clack/prompts";
-import { getShellConfig } from "@earendil-works/pi-coding-agent";
 import { satisfies } from "semver";
 import { loadConfig } from "./config.js";
+import {
+  checkBashShell,
+  checkGitAvailable,
+  checkSqliteNative,
+  formatDoctorReport,
+  nodeVersionStatus,
+  runDoctorDiagnostics,
+} from "./doctor.js";
 import { runLocalAgentProvider } from "./local-agent-adapters.js";
 import {
   isLocalAgentProvider,
@@ -20,6 +27,7 @@ import {
 import {
   assertLocalAgentProviderAvailable,
   formatLocalAgentProviderAvailabilitySummary,
+  refreshLocalAgentProviderAvailabilitySnapshot,
 } from "./local-agent-availability.js";
 import {
   formatAvailableLocalAgentTargets,
@@ -38,9 +46,16 @@ import {
   type DevspaceUserConfig,
 } from "./user-config.js";
 import { expandHomePath } from "./roots.js";
+import {
+  installLaunchdService,
+  launchdServiceIsInstalled,
+  printServiceHelp,
+  resolveDevspaceCliPath,
+  uninstallLaunchdService,
+} from "./service.js";
 import { shutdownHttpServer } from "./server-shutdown.js";
 
-type Command = "serve" | "init" | "doctor" | "config" | "agents" | "help" | "version";
+type Command = "serve" | "init" | "doctor" | "config" | "agents" | "service" | "help" | "version";
 const require = createRequire(import.meta.url);
 const SUPPORTED_NODE_RANGE = ">=20.12 <27";
 
@@ -67,6 +82,9 @@ async function main(argv: string[]): Promise<void> {
     case "agents":
       await runAgentsCommand(args);
       return;
+    case "service":
+      await runServiceCommand(args);
+      return;
     case "help":
       printHelp();
       return;
@@ -78,7 +96,7 @@ async function main(argv: string[]): Promise<void> {
 
 function normalizeCommand(command: string | undefined): Command {
   if (!command || command === "serve" || command === "start") return "serve";
-  if (command === "init" || command === "doctor" || command === "config" || command === "agents") return command;
+  if (command === "init" || command === "doctor" || command === "config" || command === "agents" || command === "service") return command;
   if (command === "help" || command === "--help" || command === "-h") return "help";
   if (command === "version" || command === "--version" || command === "-v") return "version";
   throw new Error(`Unknown command: ${command}`);
@@ -213,6 +231,7 @@ async function serve(): Promise<void> {
 
   const { createServer } = await import("./server.js");
   const config = loadConfig();
+  runStartupPreflight(config);
   const { app, close, localAgentProviders } = createServer(config);
   const httpServer = app.listen(config.port, config.host, () => {
     console.log(`devspace listening on http://${config.host}:${config.port}/mcp`);
@@ -247,25 +266,51 @@ async function serve(): Promise<void> {
 }
 
 async function runDoctor(): Promise<void> {
-  const files = loadDevspaceFiles();
-  console.log(`Config dir: ${files.dir}`);
-  console.log(`Config file: ${files.configExists ? files.configPath : "missing"}`);
-  console.log(`Auth file: ${files.authExists ? files.authPath : "missing"}`);
-  console.log(`Node: ${process.version} (${nodeVersionStatus()})`);
-  console.log(`Node ABI: ${process.versions.modules}`);
-  console.log(`Platform: ${process.platform} ${process.arch}`);
-  console.log(`Git: ${checkGitAvailable()}`);
-  console.log(`Bash shell: ${checkBashShell()}`);
-  console.log(`SQLite native dependency: ${checkSqliteNative()}`);
-
   try {
     const config = loadConfig();
-    console.log(`Local MCP URL: http://${config.host}:${config.port}/mcp`);
-    console.log(`Public MCP URL: ${new URL("/mcp", config.publicBaseUrl).toString()}`);
-    console.log(`Allowed roots: ${config.allowedRoots.join(", ")}`);
-    console.log(`Allowed hosts: ${config.allowedHosts.join(", ")}`);
+    const report = await runDoctorDiagnostics({
+      host: config.host,
+      port: config.port,
+      publicBaseUrl: config.publicBaseUrl,
+      allowedRoots: config.allowedRoots,
+      allowedHosts: config.allowedHosts,
+      subagents: config.subagents,
+    });
+    console.log(formatDoctorReport(report));
   } catch (error) {
+    const files = loadDevspaceFiles();
+    const report = await runDoctorDiagnostics({
+      host: "127.0.0.1",
+      port: 7676,
+      publicBaseUrl: "http://127.0.0.1:7676",
+      allowedRoots: files.config.allowedRoots ?? [],
+      allowedHosts: files.config.allowedHosts ?? [],
+      subagents: files.config.subagents ?? false,
+    });
+    console.log(formatDoctorReport(report));
     console.log(`Config status: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
+function runStartupPreflight(config: ReturnType<typeof loadConfig>): void {
+  const { statSync } = require("node:fs") as typeof import("node:fs");
+  for (const root of config.allowedRoots) {
+    try {
+      const info = statSync(root);
+      if (!info.isDirectory()) {
+        console.warn(`warning: allowed root is not a directory: ${root}`);
+      }
+    } catch (error) {
+      console.warn(`warning: allowed root does not exist or is inaccessible: ${root}`);
+    }
+  }
+
+  if (config.subagents) {
+    const providers = refreshLocalAgentProviderAvailabilitySnapshot();
+    const unavailable = providers.filter((p) => !p.available);
+    if (unavailable.length > 0) {
+      console.warn(`warning: subagents enabled but some providers are unavailable: ${formatLocalAgentProviderAvailabilitySummary(unavailable)}`);
+    }
   }
 }
 
@@ -306,13 +351,15 @@ function printHelp(): void {
       "  devspace                 Run first-time setup if needed, then start the server",
       "  devspace serve           Start the server",
       "  devspace init            Create or update ~/.devspace/config.json and auth.json",
-      "  devspace doctor          Show config, runtime, and native dependency status",
+      "  devspace doctor          Show config, runtime, network, and provider status",
       "  devspace config get      Print persisted config",
       "  devspace config set publicBaseUrl <url|null>",
       "  devspace agents ls       List subagent sessions",
       "  devspace agents run <profile-or-provider-or-id> [--model <model>] <prompt>",
       "  devspace agents show <id>",
       "  devspace agents wait <id> [--timeout <seconds>]",
+      "  devspace service install [--no-start]  Install a macOS LaunchAgent (start by default)",
+      "  devspace service uninstall Remove the macOS LaunchAgent",
       "  devspace -v, --version   Print the installed version",
       "",
       "For temporary tunnels:",
@@ -660,6 +707,51 @@ function printAgentsHelp(): void {
   );
 }
 
+async function runServiceCommand(args: string[]): Promise<void> {
+  const [subcommand] = args;
+  switch (subcommand) {
+    case "install": {
+      const cliPath = resolveDevspaceCliPath();
+      const result = installLaunchdService({
+        cliPath,
+        configDir: process.env.DEVSPACE_CONFIG_DIR,
+        env: process.env,
+        start: !args.includes("--no-start"),
+      });
+      if (result.installed) {
+        console.log(`LaunchAgent installed: ${result.path}`);
+        if (result.message) {
+          console.log(result.message);
+        }
+      } else {
+        throw new Error(result.message ?? "LaunchAgent installation failed");
+      }
+      return;
+    }
+    case "uninstall": {
+      const result = uninstallLaunchdService();
+      if (result.removed) {
+        console.log(`LaunchAgent removed: ${result.path}`);
+      } else {
+        console.log(result.message ?? "No LaunchAgent was installed");
+      }
+      return;
+    }
+    case undefined:
+    case "help":
+    case "--help":
+    case "-h":
+    case "status":
+      console.log(printServiceHelp());
+      if (subcommand === "status") {
+        console.log(`\nInstalled: ${launchdServiceIsInstalled() ? "yes" : "no"}`);
+      }
+      return;
+    default:
+      throw new Error(`Unknown service command: ${subcommand}`);
+  }
+}
+
 function printVersion(): void {
   const packageJson = require("../package.json") as { version?: unknown };
   if (typeof packageJson.version !== "string") {
@@ -738,44 +830,7 @@ function assertSupportedNode(): void {
   );
 }
 
-function nodeVersionStatus(): string {
-  return satisfies(process.versions.node, SUPPORTED_NODE_RANGE)
-    ? `supported ${SUPPORTED_NODE_RANGE}`
-    : `unsupported, requires ${SUPPORTED_NODE_RANGE}`;
-}
-
 class SetupCancelledError extends Error {}
-
-function checkSqliteNative(): string {
-  try {
-    const Database = require("better-sqlite3") as typeof import("better-sqlite3");
-    const db = new Database(":memory:");
-    db.close();
-    return "ok";
-  } catch (error) {
-    return error instanceof Error ? error.message : String(error);
-  }
-}
-
-function checkGitAvailable(): string {
-  try {
-    const { execFileSync } = require("node:child_process") as typeof import("node:child_process");
-    return execFileSync("git", ["--version"], { encoding: "utf8" }).trim();
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    return `unavailable (${message})`;
-  }
-}
-
-function checkBashShell(): string {
-  try {
-    const { shell, args } = getShellConfig();
-    return `${shell} ${args.join(" ")}`;
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    return `unavailable (${message})`;
-  }
-}
 
 main(process.argv.slice(2)).catch((error) => {
   console.error(error instanceof Error ? error.message : String(error));

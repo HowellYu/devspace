@@ -177,6 +177,122 @@ test("checkout reuse and context suppression survive a registry restart", async 
   }
 });
 
+test("open_workspace exposes project memory namespace and existing memory files", async (t) => {
+  const context = await fixture(t);
+  const workspaceId = structuredContent(await callOpen(context.client, context.project, "chat-1")).workspaceId as string;
+  await callTool(context.client, "write_project_memory", { workspaceId, file: "decisions.md", content: "# Decisions\n\nUse SQLite.\n" });
+  await callTool(context.client, "write_project_memory", { workspaceId, file: "progress.md", content: "# Progress\n\nSetup done.\n" });
+
+  const opened = await callOpen(context.client, context.project, "chat-1");
+  const structured = structuredContent(opened);
+  assert.equal(typeof structured.memoryNamespace, "string");
+  assert.ok(Array.isArray(structured.memoryFiles));
+  assert.deepEqual((structured.memoryFiles as string[]).sort(), ["decisions.md", "progress.md"]);
+  assert.match(responseText(opened), /Project memory: decisions\.md, progress\.md/);
+
+  const card = responseCard(opened);
+  assert.equal(typeof card.memoryNamespace, "string");
+  assert.ok(Array.isArray(card.memoryFiles));
+});
+
+test("project memory persists across server restarts for the same workspace", async (t) => {
+  const context = await fixture(t);
+  const first = await callOpen(context.client, context.project, "chat-1");
+  const workspaceId = structuredContent(first).workspaceId as string;
+  await callTool(context.client, "write_project_memory", { workspaceId, file: "next-steps.md", content: "- Write tests\n" });
+
+  await context.close();
+
+  const restoredStore = new SqliteWorkspaceStore(context.stateDir);
+  const restoredServer = createMcpServer(
+    context.config,
+    new WorkspaceRegistry(context.config, restoredStore),
+    createReviewCheckpointManager(),
+    new ProcessSessionManager(),
+    [],
+    [],
+  );
+  const [restoredClientTransport, restoredServerTransport] = InMemoryTransport.createLinkedPair();
+  const restoredClient = new Client({ name: "devspace-restored-test-client", version: "1.0.0" });
+  let restoredClosed = false;
+  const closeRestored = async () => {
+    if (restoredClosed) return;
+    restoredClosed = true;
+    await restoredClient.close();
+    await restoredServer.close();
+    restoredStore.close();
+  };
+  t.after(closeRestored);
+
+  try {
+    await Promise.all([
+      restoredClient.connect(restoredClientTransport),
+      restoredServer.connect(restoredServerTransport),
+    ]);
+
+    const restored = await callOpen(restoredClient, context.project, "chat-1");
+    const restoredWorkspaceId = structuredContent(restored).workspaceId as string;
+    assert.equal(restoredWorkspaceId, workspaceId);
+    const content = structuredContent(
+      await callTool(restoredClient, "read_project_memory", { workspaceId: restoredWorkspaceId, file: "next-steps.md" }),
+    ).result as string;
+    assert.equal(content, "- Write tests\n");
+  } finally {
+    await closeRestored();
+  }
+});
+
+test("project memory is isolated by canonical workspace root", async (t) => {
+  const context = await fixture(t);
+  const projectA = join(context.config.allowedRoots[0], "project-a");
+  const projectB = join(context.config.allowedRoots[0], "project-b");
+
+  const openA = await callOpen(context.client, projectA, "chat-a");
+  const openB = await callOpen(context.client, projectB, "chat-b");
+  const idA = structuredContent(openA).workspaceId as string;
+  const idB = structuredContent(openB).workspaceId as string;
+
+  await callTool(context.client, "write_project_memory", { workspaceId: idA, file: "decisions.md", content: "A\n" });
+  await callTool(context.client, "write_project_memory", { workspaceId: idB, file: "decisions.md", content: "B\n" });
+
+  const readA = structuredContent(
+    await callTool(context.client, "read_project_memory", { workspaceId: idA, file: "decisions.md" }),
+  ).result as string;
+  const readB = structuredContent(
+    await callTool(context.client, "read_project_memory", { workspaceId: idB, file: "decisions.md" }),
+  ).result as string;
+
+  assert.equal(readA, "A\n");
+  assert.equal(readB, "B\n");
+});
+
+test("memory filename validation rejects traversal, hidden, and non-markdown names", async (t) => {
+  const context = await fixture(t);
+  const workspaceId = structuredContent(await callOpen(context.client, context.project, "chat-1")).workspaceId as string;
+
+  for (const file of ["../decisions.md", "subdir/file.md", ".hidden.md", "notes.txt"]) {
+    const result = await callTool(context.client, "write_project_memory", { workspaceId, file, content: "x" });
+    assert.equal(result.isError, true, `expected error for ${file}`);
+    assert.match(responseText(result), /Invalid memory file name/);
+  }
+});
+
+test("write_project_memory overwrites and updates existing memory files", async (t) => {
+  const context = await fixture(t);
+  const workspaceId = structuredContent(await callOpen(context.client, context.project, "chat-1")).workspaceId as string;
+
+  await callTool(context.client, "write_project_memory", { workspaceId, file: "decisions.md", content: "v1\n" });
+  const firstRead = structuredContent(await callTool(context.client, "read_project_memory", { workspaceId, file: "decisions.md" })).result as string;
+  assert.equal(firstRead, "v1\n");
+
+  await callTool(context.client, "write_project_memory", { workspaceId, file: "decisions.md", content: "v2\n" });
+  const secondRead = structuredContent(await callTool(context.client, "read_project_memory", { workspaceId, file: "decisions.md" })).result as string;
+  assert.equal(secondRead, "v2\n");
+
+  const listed = (await callTool(context.client, "list_project_memory", { workspaceId })).structuredContent as { files: string[] };
+  assert.deepEqual(listed.files, ["decisions.md"]);
+});
+
 interface ServerFixture {
   client: Client;
   project: string;
@@ -300,4 +416,12 @@ function responseCard(result: Awaited<ReturnType<Client["callTool"]>>): Record<s
   const card = (metadata as Record<string, unknown>).card;
   assert.ok(card && typeof card === "object");
   return card as Record<string, unknown>;
+}
+
+async function callTool(
+  client: Client,
+  name: string,
+  arguments_: Record<string, unknown>,
+): Promise<Awaited<ReturnType<Client["callTool"]>>> {
+  return client.callTool({ name, arguments: arguments_ });
 }

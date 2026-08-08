@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile, execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -229,4 +229,47 @@ try {
   }
 } finally {
   rmSync(waitRoot, { recursive: true, force: true });
+}
+
+// devspace service install --no-start
+
+const serviceRoot = mkdtempSync(join(tmpdir(), "devspace-cli-service-test-"));
+try {
+  const configDir = join(serviceRoot, ".devspace");
+  mkdirSync(configDir, { recursive: true });
+
+  const serviceCliEnv = (homeDir?: string): NodeJS.ProcessEnv => ({
+    ...process.env,
+    DEVSPACE_CONFIG_DIR: configDir,
+    ...(homeDir && { HOME: homeDir }),
+  });
+
+  const runServiceCli = (args: string[], homeDir?: string): string =>
+    execFileSync("node", ["--import", "tsx", "src/cli.ts", "service", ...args], {
+      cwd: process.cwd(),
+      encoding: "utf8",
+      env: serviceCliEnv(homeDir),
+    });
+
+  if (process.platform === "darwin") {
+    const homeDir = join(serviceRoot, "home");
+    mkdirSync(homeDir, { recursive: true });
+
+    const output = runServiceCli(["install", "--no-start"], homeDir);
+    assert.match(output, /LaunchAgent installed/);
+    assert.match(output, /not started/);
+
+    const plist = join(homeDir, "Library", "LaunchAgents", "dev.devspace.agent.plist");
+    assert.equal(existsSync(plist), true);
+    assert.match(readFileSync(plist, "utf8"), /<string>serve<\/string>/);
+  } else {
+    // On non-macOS the command is rejected cleanly without touching the real home directory.
+    assert.throws(
+      () => runServiceCli(["install", "--no-start"]),
+      (error: unknown) =>
+        error instanceof Error && /LaunchAgent service is only supported on macOS/.test(error.message),
+    );
+  }
+} finally {
+  rmSync(serviceRoot, { recursive: true, force: true });
 }

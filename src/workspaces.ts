@@ -10,6 +10,7 @@ import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { loadProjectContextFiles } from "@earendil-works/pi-coding-agent";
 import type { ServerConfig } from "./config.js";
 import { createManagedWorktree } from "./git-worktrees.js";
+import { memoryNamespaceId, memoryNamespacePath } from "./project-memory.js";
 import {
   AccessDeniedError,
   assertAllowedPath,
@@ -321,6 +322,18 @@ export class WorkspaceRegistry {
   resolveWorkingDirectory(workspace: Workspace, workingDirectory: string | undefined): string {
     const directory = workingDirectory ? this.resolvePath(workspace, workingDirectory) : workspace.root;
     return assertAllowedPath(directory, [workspace.root]);
+  }
+
+  memoryRoot(workspace: Workspace): string {
+    return workspace.sourceRoot ?? workspace.root;
+  }
+
+  memoryNamespacePath(workspace: Workspace): string {
+    return memoryNamespacePath(this.config.stateDir, this.memoryRoot(workspace));
+  }
+
+  memoryNamespaceId(workspace: Workspace): string {
+    return memoryNamespaceId(this.memoryRoot(workspace));
   }
 
   private async openCheckoutWorkspace(path: string): Promise<WorkspaceContext> {

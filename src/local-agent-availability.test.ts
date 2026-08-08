@@ -1,9 +1,15 @@
 import assert from "node:assert/strict";
+import test from "node:test";
 import {
   checkLocalAgentProviderAvailability,
+  clearLocalAgentProviderAvailabilityCache,
   formatLocalAgentProviderAvailabilitySummary,
   getLocalAgentProviderAvailabilitySnapshot,
+  LocalAgentProviderAvailabilityCache,
+  refreshLocalAgentProviderAvailabilitySnapshot,
 } from "./local-agent-availability.js";
+
+clearLocalAgentProviderAvailabilityCache();
 
 assert.equal(checkLocalAgentProviderAvailability("codex").available, true);
 
@@ -88,3 +94,33 @@ if (process.platform !== "win32") {
     rmSync(sandbox, { recursive: true, force: true });
   }
 }
+
+test("availability cache reuses results within TTL and refreshes on demand", () => {
+  const cache = new LocalAgentProviderAvailabilityCache(100_000);
+  const env = { ...process.env, PATH: process.env.PATH };
+  const first = cache.snapshot(env, { refresh: true });
+  assert.equal(first.length, 7);
+
+  const cached = cache.snapshot(env);
+  assert.equal(cached, first);
+
+  const refreshed = cache.snapshot(env, { refresh: true });
+  assert.notEqual(refreshed, first);
+  assert.equal(refreshed.length, 7);
+
+  cache.clear();
+  const afterClear = cache.snapshot(env);
+  assert.notEqual(afterClear, refreshed);
+  assert.equal(afterClear.length, 7);
+});
+
+test("default snapshot cache returns cached results and refresh bypasses cache", () => {
+  clearLocalAgentProviderAvailabilityCache();
+  const first = getLocalAgentProviderAvailabilitySnapshot(process.env);
+  const second = getLocalAgentProviderAvailabilitySnapshot(process.env);
+  assert.equal(first, second);
+
+  const refreshed = refreshLocalAgentProviderAvailabilitySnapshot(process.env);
+  assert.notEqual(refreshed, second);
+  assert.equal(refreshed.length, first.length);
+});

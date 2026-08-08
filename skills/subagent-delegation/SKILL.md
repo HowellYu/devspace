@@ -49,6 +49,17 @@ Do not run provider CLIs such as `codex`, `claude`, `opencode`, `pi`,
 `cursor-agent`, or `copilot` directly unless you are explicitly debugging
 DevSpace agent integration.
 
+## Diagnostics and security
+
+If a subagent provider is unavailable, run `devspace doctor` to check provider
+availability, local listener health, and the public URL reachability advisory.
+
+Subagent workers inherit the local-user authority of the DevSpace process. ACP
+auto-approval inside a worker is a convenience, not a security boundary. The real
+boundary is the OS user account that runs DevSpace. Recommend that the user runs
+DevSpace as a dedicated, non-administrator account with access only to the
+intended project roots.
+
 ## Choosing a profile
 
 Choose profiles from the compact subagent profile catalog returned by
@@ -121,6 +132,27 @@ Rules:
 - Cite relevant file paths and symbols.
 - Separate facts from guesses.
 ```
+
+## Project memory
+
+Workers can read and write durable project memory through DevSpace. Use these
+tools so the same memory is available to the host brain and other workers:
+
+- `list_project_memory({ workspaceId })`
+- `read_project_memory({ workspaceId, file })`
+- `write_project_memory({ workspaceId, file, content })`
+
+Well-known file names:
+
+- `decisions.md` — key decisions and rationale.
+- `progress.md` — what has been completed.
+- `next-steps.md` — remaining work or checkpoints.
+
+Memory is stored outside the repo under DevSpace state. It persists across
+sessions for the same canonical project root. Use it only for durable project
+facts, decisions, and checkpoints; do not store secrets or transient
+chain-of-thought there. File names must end with `.md` and contain no path
+separators or hidden names.
 
 ## After the worker responds
 

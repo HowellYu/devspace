@@ -109,6 +109,28 @@ fail closed. Downloads stream under the configured per-file limit and are
 published without overwrite as owner-only files. DevSpace does not extract or
 execute transferred content.
 
+## Project Memory
+
+Project memory is stored under `DEVSPACE_STATE_DIR` (default `~/.local/share/devspace`), not inside the repo by default. It is scoped to the canonical project root and shared by checkout and worktree modes for the same project.
+
+Use memory only for durable project facts, decisions, and checkpoints. Do not store secrets, credentials, owner passwords, or transient chain-of-thought in memory files. Memory file names are validated to prevent hidden files, path separators, and traversal.
+
+## Subagents and ACP Providers
+
+When subagents are enabled (`DEVSPACE_SUBAGENTS=1`), DevSpace can delegate tasks
+to local ACP providers such as `luna`, `cursor-agent`, or `copilot`. Those
+workers run with the same local-user authority as DevSpace itself and can read,
+write, and execute commands under the configured roots.
+
+ACP connectors may auto-approve tool requests within the delegated session. That
+auto-approval is a convenience inside the worker, not a security boundary. The
+real boundary is the operating-system user account that runs DevSpace. Run
+DevSpace as a dedicated, non-administrator OS user with access only to the
+projects it should touch. Do not run DevSpace as root, as an administrator, or
+as a user that owns sensitive credentials outside your coding workspace.
+
+Review subagent output before acting on it, and keep subagent profiles narrow.
+
 ## Logs
 
 By default, DevSpace logs requests and tool calls. Shell command previews are

@@ -1,5 +1,5 @@
-import { timingSafeEqual, randomBytes, randomUUID, createHash } from "node:crypto";
-import type { Response } from "express";
+import { randomBytes, randomUUID, createHash } from "node:crypto";
+import type { Request, Response } from "express";
 import type { OAuthRegisteredClientsStore } from "@modelcontextprotocol/sdk/server/auth/clients.js";
 import type { OAuthServerProvider, AuthorizationParams } from "@modelcontextprotocol/sdk/server/auth/provider.js";
 import { AccessDeniedError, InvalidGrantError, InvalidRequestError, InvalidTokenError } from "@modelcontextprotocol/sdk/server/auth/errors.js";
@@ -11,6 +11,7 @@ import type {
 } from "@modelcontextprotocol/sdk/shared/auth.js";
 import { checkResourceAllowed, resourceUrlFromServerUrl } from "@modelcontextprotocol/sdk/shared/auth-utils.js";
 import { SqliteOAuthClientsStore, SqliteOAuthStore } from "./oauth-store.js";
+import { constantTimeEquals, OAuthRateLimiter, requestRateLimitKey } from "./oauth-rate-limit.js";
 
 export interface OAuthConfig {
   ownerToken: string;
@@ -27,16 +28,11 @@ interface AuthorizationCodeRecord {
 }
 
 const CODE_TTL_MS = 5 * 60 * 1000;
+const CSRF_NONCE_COOKIE_NAME = "devspace_auth_nonce";
+const CSRF_NONCE_TTL_SECONDS = 600;
 
 function randomToken(): string {
   return randomBytes(32).toString("base64url");
-}
-
-function safeEquals(a: string, b: string): boolean {
-  const left = Buffer.from(a);
-  const right = Buffer.from(b);
-  if (left.byteLength !== right.byteLength) return false;
-  return timingSafeEqual(left, right);
 }
 
 function htmlEscape(value: string): string {
@@ -54,6 +50,7 @@ function formHtml(params: {
   scopes: string[];
   resource?: URL;
   fields: Record<string, string | undefined>;
+  csrfNonce?: string;
 }): string {
   const scopeText = params.scopes.length > 0 ? params.scopes.join(" ") : "devspace";
   const resourceText = params.resource?.href ?? "DevSpace MCP endpoint";
@@ -64,6 +61,9 @@ function formHtml(params: {
     .filter((entry): entry is [string, string] => entry[1] !== undefined)
     .map(([name, value]) => `        <input type="hidden" name="${htmlEscape(name)}" value="${htmlEscape(value)}" />`)
     .join("\n");
+  const csrfField = params.csrfNonce
+    ? `        <input type="hidden" name="${CSRF_NONCE_COOKIE_NAME}" value="${htmlEscape(params.csrfNonce)}" />`
+    : "";
 
   return `<!doctype html>
 <html lang="en">
@@ -98,6 +98,7 @@ function formHtml(params: {
       </dl>
       <form method="post">
 ${hiddenFields}
+${csrfField}
         <label for="owner_token">Owner password</label>
         <input id="owner_token" name="owner_token" type="password" autocomplete="current-password" autofocus required />
         <button type="submit">Authorize DevSpace</button>
@@ -116,15 +117,20 @@ export class SingleUserOAuthProvider implements OAuthServerProvider {
   private readonly codes = new Map<string, AuthorizationCodeRecord>();
   private readonly oauthStore: SqliteOAuthStore;
   private readonly resourceServerUrl: URL;
+  private readonly rateLimiter = new OAuthRateLimiter();
+  private readonly publicBaseUrl: URL;
 
   constructor(
     private readonly config: OAuthConfig,
     resourceServerUrl: URL,
     stateDir: string,
+    publicBaseUrl: string,
+    private readonly trustProxy: boolean,
   ) {
     this.resourceServerUrl = resourceUrlFromServerUrl(resourceServerUrl);
     this.oauthStore = new SqliteOAuthStore(stateDir);
     this.clientsStore = new SqliteOAuthClientsStore(this.oauthStore, config.allowedRedirectHosts);
+    this.publicBaseUrl = new URL(publicBaseUrl);
   }
 
   async authorize(
@@ -139,10 +145,33 @@ export class SingleUserOAuthProvider implements OAuthServerProvider {
       throw new InvalidRequestError("Requested scope is not supported");
     }
 
-    if (res.req.method !== "POST") {
+    const req = res.req;
+
+    if (req.method !== "POST") {
+      const nonce = randomToken();
+      setCsrfNonceCookie(res, nonce, this.publicBaseUrl);
       res.status(200).setHeader("Content-Type", "text/html; charset=utf-8");
       res.send(
         formHtml({
+          clientName: client.client_name ?? client.client_id,
+          scopes: params.scopes ?? this.config.scopes,
+          resource: params.resource,
+          fields: authorizationFormFields(client, params),
+          csrfNonce: nonce,
+        }),
+      );
+      return;
+    }
+
+    const rateKey = requestRateLimitKey(req, this.trustProxy);
+    const allowed = this.rateLimiter.isAllowed(rateKey);
+    if (!allowed.allowed) {
+      res.status(429);
+      res.setHeader("Content-Type", "text/html; charset=utf-8");
+      res.setHeader("Retry-After", String(Math.ceil(allowed.retryAfterMs / 1000)));
+      res.send(
+        formHtml({
+          error: `Too many attempts. Please wait ${Math.ceil(allowed.retryAfterMs / 1000)} seconds before trying again.`,
           clientName: client.client_name ?? client.client_id,
           scopes: params.scopes ?? this.config.scopes,
           resource: params.resource,
@@ -152,8 +181,24 @@ export class SingleUserOAuthProvider implements OAuthServerProvider {
       return;
     }
 
-    const providedToken = String(res.req.body?.owner_token ?? "");
-    if (!safeEquals(providedToken, this.config.ownerToken)) {
+    const csrfError = validateCsrfNonce(req, this.publicBaseUrl);
+    if (csrfError) {
+      res.status(403).setHeader("Content-Type", "text/html; charset=utf-8");
+      res.send(
+        formHtml({
+          error: csrfError,
+          clientName: client.client_name ?? client.client_id,
+          scopes: params.scopes ?? this.config.scopes,
+          resource: params.resource,
+          fields: authorizationFormFields(client, params),
+        }),
+      );
+      return;
+    }
+
+    const providedToken = String(req.body?.owner_token ?? "");
+    if (!constantTimeEquals(providedToken, this.config.ownerToken)) {
+      this.rateLimiter.recordFailure(rateKey);
       res.status(401).setHeader("Content-Type", "text/html; charset=utf-8");
       res.send(
         formHtml({
@@ -166,6 +211,8 @@ export class SingleUserOAuthProvider implements OAuthServerProvider {
       );
       return;
     }
+
+    this.rateLimiter.recordSuccess(rateKey);
 
     const code = `code-${randomUUID()}`;
     this.codes.set(code, {
@@ -334,4 +381,63 @@ function authorizationFormFields(
 
 function hashToken(token: string): string {
   return createHash("sha256").update(token).digest("base64url");
+}
+
+function setCsrfNonceCookie(res: Response, nonce: string, publicBaseUrl: URL): void {
+  const isSecure = publicBaseUrl.protocol === "https:";
+  const attributes = [
+    `${CSRF_NONCE_COOKIE_NAME}=${nonce}`,
+    "Path=/",
+    "SameSite=Strict",
+    "HttpOnly",
+    isSecure ? "Secure" : undefined,
+    `Max-Age=${CSRF_NONCE_TTL_SECONDS}`,
+  ].filter(Boolean);
+  res.setHeader("Set-Cookie", attributes.join("; "));
+}
+
+function getCsrfNonceCookie(req: Request): string | undefined {
+  const cookieHeader = req.headers.cookie;
+  if (!cookieHeader) return undefined;
+
+  for (const raw of cookieHeader.split(";")) {
+    const [name, ...valueParts] = raw.trim().split("=");
+    if (name?.trim() === CSRF_NONCE_COOKIE_NAME) {
+      return valueParts.join("=").trim();
+    }
+  }
+  return undefined;
+}
+
+function validateCsrfNonce(req: Request, publicBaseUrl: URL): string | undefined {
+  const origin = req.headers.origin;
+  if (origin !== undefined) {
+    let originUrl: URL;
+    try {
+      originUrl = new URL(origin);
+    } catch {
+      return "Invalid Origin header.";
+    }
+
+    const expectedHost = publicBaseUrl.host;
+    const expectedProtocol = publicBaseUrl.protocol;
+    if (originUrl.host !== expectedHost || originUrl.protocol !== expectedProtocol) {
+      return "Invalid Origin header.";
+    }
+  }
+
+  const cookieNonce = getCsrfNonceCookie(req);
+  const bodyNonce = typeof req.body === "object" && req.body !== null
+    ? String(req.body[CSRF_NONCE_COOKIE_NAME] ?? "")
+    : "";
+
+  if (!cookieNonce || !bodyNonce) {
+    return "Missing authorization session. Please reload the page and try again.";
+  }
+
+  if (!constantTimeEquals(cookieNonce, bodyNonce)) {
+    return "Authorization session expired or mismatched. Please reload the page and try again.";
+  }
+
+  return undefined;
 }
