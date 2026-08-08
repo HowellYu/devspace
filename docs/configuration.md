@@ -155,7 +155,9 @@ lists existing subagent sessions for the current workspace, scoped by the
 workspace environment injected into shell commands. The `subagent-delegation`
 skill teaches the model to use only the minimal `devspace agents ls`,
 `devspace agents run`, `devspace agents wait`, and `devspace agents show`
-workflow.
+workflow. Normal runs use a 600-second execution deadline. Use a longer deadline
+only for tasks known to require long-running builds, tests, or shell commands;
+the separate wait timeout never extends the worker runtime.
 
 Starter profile templates are available under `examples/agents/`. Copy or adapt
 them into one of the active profile directories before use.
@@ -167,7 +169,8 @@ them into one of the active profile directories before use.
 | `LUNA_COMMAND` | `kimi` | Executable for the `luna` ACP provider; DevSpace runs `<command> acp`. |
 | `CURSOR_COMMAND` | `cursor-agent` | Executable for the `cursor` ACP provider. |
 | `COPILOT_COMMAND` | `copilot` | Executable for the `copilot` ACP provider. |
-| `DEVSPACE_AGENTS_WAIT_TIMEOUT` | `300` | Default `devspace agents wait` timeout in seconds (`1`-`3600`). |
+| `DEVSPACE_AGENTS_WAIT_TIMEOUT` | `300` | Default `devspace agents wait` timeout in seconds (`1`-`3600`). This only controls how long the caller waits. |
+| `DEVSPACE_AGENTS_EXECUTION_TIMEOUT` | `600` | Default maximum runtime for each subagent run in seconds (`1`-`7200`). When exceeded, DevSpace terminates the worker and records `timed_out`. Override per run with `executionTimeoutSeconds` or CLI `--max-runtime`. |
 | `DEVSPACE_PI_TIMEOUT_MS` | `120000` | Maximum wait for a `pi` subagent run to complete. Accepts an integer between `1000` and `3600000` milliseconds. |
 
 ACP providers (`cursor`, `copilot`, `luna`) resume stored provider sessions on

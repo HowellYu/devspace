@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
 import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -9,6 +10,7 @@ import type { LocalAgentProvider } from "./local-agent-profiles.js";
 import type { LocalAgentRunInput, LocalAgentRunResult } from "./local-agent-runtime.js";
 import {
   createLocalAgentOrchestrator,
+  parseAgentsExecutionTimeoutSeconds,
   type LocalAgentOrchestrator,
 } from "./local-agent-orchestrator.js";
 
@@ -87,6 +89,7 @@ test("start creates a worker, wait returns the final response", async (t) => {
   assert.match(record.id, /^agt_/);
   assert.equal(record.profileName, "reviewer");
   assert.equal(record.provider, "codex");
+  assert.equal(record.executionTimeoutSeconds, 600);
 
   const waited = await orchestrator.wait(record.id, 5);
   assert.equal(waited.record.status, "idle");
@@ -106,8 +109,12 @@ test("continue resumes the same provider session id", async (t) => {
   });
   await orchestrator.wait(record.id, 5);
 
-  const continued = await orchestrator.continue(record.id, { prompt: "second" });
+  const continued = await orchestrator.continue(record.id, {
+    prompt: "second",
+    executionTimeoutSeconds: 1200,
+  });
   assert.equal(continued.id, record.id);
+  assert.equal(continued.executionTimeoutSeconds, 1200);
   await orchestrator.wait(record.id, 5);
 
   assert.equal(captures.length, 2);
@@ -195,6 +202,97 @@ test("wait returns timedOut true for a still-running worker", async (t) => {
   const waited = await noOpOrchestrator.wait(record.id, 1);
   assert.equal(waited.timedOut, true);
   assert.equal(waited.record.status, "starting");
+});
+
+test("runtime watchdog terminates an overlong detached worker", async (t) => {
+  const { project, config, store } = await fixture(t);
+  const captures: RunCapture[] = [];
+  const timedOrchestrator = createLocalAgentOrchestrator(config, store, {
+    runProvider: fakeRunProvider(captures),
+    spawnWorker: () => {
+      const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
+        detached: true,
+        stdio: "ignore",
+      });
+      child.unref();
+      return child;
+    },
+  });
+
+  const { record } = await timedOrchestrator.start({
+    workspaceRoot: project,
+    target: "reviewer",
+    prompt: "hang",
+    executionTimeoutSeconds: 1,
+  });
+  const waited = await timedOrchestrator.wait(record.id, 5);
+  assert.equal(waited.record.status, "timed_out");
+  assert.match(waited.record.error ?? "", /execution timeout of 1s/);
+});
+
+test("child exit observer marks an unfinished worker as error", async (t) => {
+  const { project, config, store } = await fixture(t);
+  const captures: RunCapture[] = [];
+  const observedOrchestrator = createLocalAgentOrchestrator(config, store, {
+    runProvider: fakeRunProvider(captures),
+    spawnWorker: () => {
+      const child = spawn(process.execPath, ["-e", "process.exit(0)"], {
+        detached: true,
+        stdio: "ignore",
+      });
+      child.unref();
+      return child;
+    },
+  });
+
+  const { record } = await observedOrchestrator.start({
+    workspaceRoot: project,
+    target: "reviewer",
+    prompt: "exit immediately",
+  });
+  const waited = await observedOrchestrator.wait(record.id, 5);
+  assert.equal(waited.record.status, "error");
+  assert.match(waited.record.error ?? "", /exited without reporting completion/);
+});
+
+test("inspect marks a vanished worker process as error", async (t) => {
+  const { project, orchestrator, store } = await fixture(t);
+  const record = store.create({
+    workspaceRoot: project,
+    profileName: "reviewer",
+    provider: "codex",
+    workerPid: 2_147_483_647,
+    executionTimeoutSeconds: 600,
+  });
+  store.update(record.id, { status: "running" });
+
+  const inspected = await orchestrator.inspect(record.id);
+  assert.equal(inspected.record.status, "error");
+  assert.equal(inspected.record.workerPid, undefined);
+  assert.match(inspected.record.error ?? "", /exited without reporting completion/);
+});
+
+test("inspect marks a worker timed_out after its execution deadline", async (t) => {
+  const { project, orchestrator, store } = await fixture(t);
+  const record = store.create({
+    workspaceRoot: project,
+    profileName: "reviewer",
+    provider: "codex",
+    executionTimeoutSeconds: 1,
+  });
+  store.update(record.id, { status: "running" });
+
+  await new Promise((resolve) => setTimeout(resolve, 1_100));
+  const inspected = await orchestrator.inspect(record.id);
+  assert.equal(inspected.record.status, "timed_out");
+  assert.match(inspected.record.error ?? "", /execution timeout of 1s/);
+});
+
+test("execution timeout parser validates explicit values", () => {
+  assert.equal(parseAgentsExecutionTimeoutSeconds(600), 600);
+  assert.equal(parseAgentsExecutionTimeoutSeconds("1800"), 1800);
+  assert.throws(() => parseAgentsExecutionTimeoutSeconds(0), /Invalid agent execution timeout/);
+  assert.throws(() => parseAgentsExecutionTimeoutSeconds(7201), /Invalid agent execution timeout/);
 });
 
 test("stop marks a running worker as stopped", async (t) => {

@@ -119,8 +119,9 @@ Use memory only for durable project facts, decisions, and checkpoints. Do not st
 
 When subagents are enabled (`DEVSPACE_SUBAGENTS=1`), DevSpace can delegate tasks
 to local ACP providers such as `luna`, `cursor-agent`, or `copilot`. Those
-workers run with the same local-user authority as DevSpace itself and can read,
-write, and execute commands under the configured roots.
+workers run with the same local-user authority as DevSpace itself. DevSpace file
+tools enforce configured roots, but provider child processes are not contained by
+those roots unless an external OS sandbox is in place.
 
 ACP connectors may auto-approve tool requests within the delegated session. That
 auto-approval is a convenience inside the worker, not a security boundary. The
@@ -130,6 +131,10 @@ projects it should touch. Do not run DevSpace as root, as an administrator, or
 as a user that owns sensitive credentials outside your coding workspace.
 
 Review subagent output before acting on it, and keep subagent profiles narrow.
+Each worker run has a separate execution deadline (600 seconds by default,
+configurable up to 7200 seconds). Overlong workers are terminated and recorded as
+`timed_out`; inspection/wait also reconcile persisted running workers against the
+recorded process id so vanished workers do not remain `running` indefinitely.
 
 ## Logs
 

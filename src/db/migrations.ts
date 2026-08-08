@@ -32,6 +32,11 @@ const migrations: Migration[] = [
     name: "local-agent-worker-pid",
     up: migrateLocalAgentWorkerPid,
   },
+  {
+    version: 6,
+    name: "local-agent-execution-timeout",
+    up: migrateLocalAgentExecutionTimeout,
+  },
 ];
 
 export function migrateDatabase(sqlite: Database.Database): void {
@@ -168,6 +173,7 @@ function migrateLocalAgentSessions(sqlite: Database.Database): void {
       latest_response text,
       error text,
       worker_pid integer,
+      execution_timeout_seconds integer,
       created_at text not null,
       updated_at text not null
     );
@@ -184,6 +190,7 @@ function migrateLocalAgentSessions(sqlite: Database.Database): void {
 
   addColumnIfMissing(sqlite, "local_agent_sessions", "thinking", "text");
   addColumnIfMissing(sqlite, "local_agent_sessions", "worker_pid", "integer");
+  addColumnIfMissing(sqlite, "local_agent_sessions", "execution_timeout_seconds", "integer");
 }
 
 function migrateWorkspaceConversationBindings(sqlite: Database.Database): void {
@@ -207,6 +214,10 @@ function migrateWorkspaceConversationBindings(sqlite: Database.Database): void {
 
 function migrateLocalAgentWorkerPid(sqlite: Database.Database): void {
   addColumnIfMissing(sqlite, "local_agent_sessions", "worker_pid", "integer");
+}
+
+function migrateLocalAgentExecutionTimeout(sqlite: Database.Database): void {
+  addColumnIfMissing(sqlite, "local_agent_sessions", "execution_timeout_seconds", "integer");
 }
 
 function addColumnIfMissing(

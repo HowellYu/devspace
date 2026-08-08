@@ -63,6 +63,19 @@ assert.deepEqual(parseLocalAgentRunArgs(["codex", "--thinking=high", "hello"]), 
   thinking: "high",
 });
 
+assert.deepEqual(parseLocalAgentRunArgs(["codex", "--max-runtime", "1800", "hello"]), {
+  target: "codex",
+  prompt: "hello",
+  model: undefined,
+  thinking: undefined,
+  executionTimeoutSeconds: 1800,
+});
+
+assert.throws(
+  () => parseLocalAgentRunArgs(["codex", "--max-runtime", "0", "hello"]),
+  /Invalid --max-runtime value/,
+);
+
 assert.throws(
   () => parseLocalAgentRunArgs(["codex", "--model"]),
   /Missing value for --model/,

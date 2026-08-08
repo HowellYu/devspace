@@ -45,6 +45,7 @@ class FakeOrchestrator implements LocalAgentOrchestrator {
       status: "starting",
       model: input.model,
       thinking: input.thinking,
+      executionTimeoutSeconds: input.executionTimeoutSeconds ?? 600,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     };
@@ -56,6 +57,7 @@ class FakeOrchestrator implements LocalAgentOrchestrator {
     const record = this.get(workerId);
     if (!record) throw new Error(`Unknown workerId: ${workerId}`);
     record.status = "starting";
+    record.executionTimeoutSeconds = input.executionTimeoutSeconds ?? record.executionTimeoutSeconds;
     record.updatedAt = new Date().toISOString();
     return record;
   }
@@ -517,6 +519,7 @@ test("start_worker returns a worker id and structured status", async (t) => {
   assert.equal(structured.status, "starting");
   assert.equal(structured.provider, "reviewer");
   assert.equal(structured.profile, "reviewer");
+  assert.equal(structured.executionTimeoutSeconds, 600);
   assert.equal(structured.fallbackUsed, false);
   assert.ok((structured.result as string).includes(structured.workerId as string));
 });
@@ -580,10 +583,12 @@ test("continue_worker resumes the same worker id", async (t) => {
     workspaceId,
     workerId: started.workerId,
     prompt: "second",
+    executionTimeoutSeconds: 1800,
   });
   const structured = structuredContent(result);
   assert.equal(structured.workerId, started.workerId);
   assert.equal(structured.status, "starting");
+  assert.equal(structured.executionTimeoutSeconds, 1800);
 });
 
 test("worker tools are not registered when subagents are disabled", async (t) => {

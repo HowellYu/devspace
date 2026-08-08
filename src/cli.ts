@@ -345,7 +345,7 @@ function printHelp(): void {
       "  devspace config get      Print persisted config",
       "  devspace config set publicBaseUrl <url|null>",
       "  devspace agents ls       List subagent sessions",
-      "  devspace agents run <profile-or-provider-or-id> [--model <model>] <prompt>",
+      "  devspace agents run <profile-or-provider-or-id> [--model <model>] [--thinking <level>] [--max-runtime <seconds>] <prompt>",
       "  devspace agents show <id>",
       "  devspace agents wait <id> [--timeout <seconds>]",
       "  devspace service install [--no-start]  Install a macOS LaunchAgent (start by default)",
@@ -416,6 +416,7 @@ async function runAgentsRun(args: string[]): Promise<void> {
         prompt: parsed.prompt,
         model: parsed.model,
         thinking: parsed.thinking,
+        executionTimeoutSeconds: parsed.executionTimeoutSeconds,
       })
     : (await orchestrator.start({
         workspaceId: process.env.DEVSPACE_WORKSPACE_ID,
@@ -424,6 +425,7 @@ async function runAgentsRun(args: string[]): Promise<void> {
         prompt: parsed.prompt,
         model: parsed.model,
         thinking: parsed.thinking,
+        executionTimeoutSeconds: parsed.executionTimeoutSeconds,
       })).record;
   console.log(formatAgentLine(record));
 }
@@ -539,7 +541,7 @@ function printAgentsHelp(): void {
       "",
       "Usage:",
       "  devspace agents ls",
-      "  devspace agents run <profile-or-provider-or-id> [--model <model>] [--thinking <level>] <prompt>",
+      "  devspace agents run <profile-or-provider-or-id> [--model <model>] [--thinking <level>] [--max-runtime <seconds>] <prompt>",
       "  devspace agents show <id>",
       "  devspace agents wait <id> [--timeout <seconds>]",
     ].join("\n"),

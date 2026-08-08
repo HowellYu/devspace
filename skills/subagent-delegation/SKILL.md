@@ -17,19 +17,24 @@ being used.
 Prefer the native MCP worker tools when the host supports them. Use the
 `devspace agents` CLI only as a fallback or for debugging.
 
-- `start_worker({ workspaceId, target, prompt, fallback? })` — start a worker
+- `start_worker({ workspaceId, target, prompt, fallback?, executionTimeoutSeconds? })` — start a worker
   and get a `workerId`. Target is a profile name from `open_workspace`, a
   built-in provider name, or an existing worker id to resume. Set `fallback` to
   `true` to allow DevSpace to pick the first available provider if the target's
-  provider is unavailable.
+  provider is unavailable. Worker runtime defaults to 600 seconds. Keep that
+  default for normal work; raise it only when the task is known to require
+  longer-running builds, tests, or other shell execution.
 - `wait_worker({ workspaceId, workerId, timeoutSeconds? })` — block until the
-  worker finishes, errors, or stops. A timeout never stops the worker; call
-  `wait_worker` again. The default timeout is 300 seconds.
+  worker finishes, errors, stops, or reaches its execution deadline. The wait
+  timeout is separate from the execution deadline: a wait timeout never stops
+  the worker, while an execution timeout terminates it and records `timed_out`.
+  The default wait timeout is 300 seconds.
 - `inspect_worker({ workspaceId, workerId })` — quick status, latest response,
   provider session id, and cheap changed-file metadata if a review checkpoint is
   available.
-- `continue_worker({ workspaceId, workerId, prompt })` — send a follow-up that
-  resumes the same provider conversation/session id.
+- `continue_worker({ workspaceId, workerId, prompt, executionTimeoutSeconds? })` — send a follow-up that
+  resumes the same provider conversation/session id. It keeps the worker's
+  current runtime limit unless explicitly overridden.
 - `stop_worker({ workspaceId, workerId })` — best-effort stop a running or
   starting worker.
 
@@ -39,7 +44,7 @@ Use the CLI commands below only when the native MCP tools are not available:
 
 ```bash
 devspace agents ls
-devspace agents run <profile-or-provider-or-id> "<prompt>"
+devspace agents run <profile-or-provider-or-id> [--max-runtime <seconds>] "<prompt>"
 devspace agents wait <id> [--timeout <seconds>]
 devspace agents show <id>
 ```
@@ -48,7 +53,8 @@ devspace agents show <id>
 it automatically from the shell environment injected by the workspace tool.
 
 `run <profile> "<prompt>"` starts a new configured profile and prints a
-DevSpace agent id.
+DevSpace agent id. Runtime defaults to 600 seconds (`DEVSPACE_AGENTS_EXECUTION_TIMEOUT`); use
+`--max-runtime <seconds>` only when the task is known to need longer.
 
 `run <provider> "<prompt>"` starts a raw built-in provider when no configured
 profile is needed. Built-in providers are listed by `open_workspace`.
@@ -56,11 +62,13 @@ profile is needed. Built-in providers are listed by `open_workspace`.
 `run <id> "<prompt>"` sends a follow-up to an existing agent. Follow-ups
 continue the same provider conversation; they do not start over.
 
-`wait <id>` blocks until the agent finishes, errors, or stops, then prints the
-final response once. Use it right after `run` instead of polling `show`. The
-default timeout is 300 seconds (override with `--timeout <seconds>` or
-`DEVSPACE_AGENTS_WAIT_TIMEOUT`). A timeout never stops the worker — call
-`wait` again to keep waiting.
+`wait <id>` blocks until the agent finishes, errors, stops, or is marked
+`timed_out`, then prints the final state once. Use it right after `run` instead
+of polling `show`. The default wait timeout is 300 seconds (override with
+`--timeout <seconds>` or `DEVSPACE_AGENTS_WAIT_TIMEOUT`). A wait timeout never
+stops the worker; the separate execution deadline does. DevSpace also reconciles
+persisted running workers against their recorded process id so vanished workers
+do not remain `running` indefinitely.
 
 `show <id>` prints status and the latest response for quick checks and manual
 debugging. If the agent is still running, `show` returns the current status;

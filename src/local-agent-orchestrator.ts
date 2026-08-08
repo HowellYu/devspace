@@ -38,6 +38,7 @@ export interface StartWorkerInput {
   model?: string;
   thinking?: string;
   fallback?: boolean;
+  executionTimeoutSeconds?: number;
 }
 
 export interface StartWorkerResult {
@@ -49,6 +50,7 @@ export interface ContinueWorkerInput {
   prompt: string;
   model?: string;
   thinking?: string;
+  executionTimeoutSeconds?: number;
 }
 
 export interface WaitWorkerResult {
@@ -97,6 +99,8 @@ export interface CreateLocalAgentOrchestratorOptions {
 
 const AGENTS_WAIT_DEFAULT_TIMEOUT_SECONDS = 300;
 const AGENTS_WAIT_MAX_TIMEOUT_SECONDS = 3600;
+const AGENTS_EXECUTION_DEFAULT_TIMEOUT_SECONDS = 600;
+const AGENTS_EXECUTION_MAX_TIMEOUT_SECONDS = 7200;
 const AGENTS_WAIT_POLL_MS = 750;
 
 export function createLocalAgentOrchestrator(
@@ -106,9 +110,92 @@ export function createLocalAgentOrchestrator(
 ): LocalAgentOrchestrator {
   const runProvider = options.runProvider ?? runLocalAgentProvider;
   const spawnWorker = options.spawnWorker ?? defaultSpawnWorker;
+  const watchdogs = new Map<string, NodeJS.Timeout>();
+
+  const reconcile = (record: LocalAgentRecord): LocalAgentRecord => {
+    if (isTerminalStatus(record.status)) return record;
+
+    if (record.executionTimeoutSeconds && hasExceededExecutionTimeout(record)) {
+      if (record.workerPid) {
+        try {
+          terminateWorker(record.workerPid);
+        } catch {
+          // Preserve timeout state even when process termination itself fails.
+        }
+      }
+      clearWorkerWatchdog(watchdogs, record.id);
+      return store.update(record.id, {
+        status: "timed_out",
+        error: `Worker exceeded execution timeout of ${record.executionTimeoutSeconds}s.`,
+        workerPid: undefined,
+      });
+    }
+
+    if (record.workerPid && !isWorkerProcessAlive(record.workerPid)) {
+      clearWorkerWatchdog(watchdogs, record.id);
+      return store.update(record.id, {
+        status: "error",
+        error: "Worker process exited without reporting completion.",
+        workerPid: undefined,
+      });
+    }
+
+    return record;
+  };
+
+  const armWatchdog = (record: LocalAgentRecord): void => {
+    if (!record.workerPid || !record.executionTimeoutSeconds || isTerminalStatus(record.status)) return;
+    clearWorkerWatchdog(watchdogs, record.id);
+    const remainingMs = Math.max(
+      1,
+      record.executionTimeoutSeconds * 1000 - (Date.now() - Date.parse(record.updatedAt)),
+    );
+    const timer = setTimeout(() => {
+      const current = store.get(record.id);
+      if (!current || isTerminalStatus(current.status)) {
+        clearWorkerWatchdog(watchdogs, record.id);
+        return;
+      }
+      store.update(current.id, {
+        status: "timed_out",
+        error: `Worker exceeded execution timeout of ${current.executionTimeoutSeconds ?? record.executionTimeoutSeconds}s.`,
+        workerPid: undefined,
+      });
+      if (current.workerPid) {
+        try {
+          terminateWorker(current.workerPid);
+        } catch {
+          // Timeout state is already persisted; process termination remains best-effort.
+        }
+      }
+      clearWorkerWatchdog(watchdogs, current.id);
+    }, remainingMs);
+    timer.unref?.();
+    watchdogs.set(record.id, timer);
+  };
+
+  const observeWorkerExit = (
+    child: ChildProcess | { pid?: number } | void | Promise<void>,
+    workerId: string,
+  ): void => {
+    if (!child || typeof child !== "object" || !("once" in child) || typeof child.once !== "function") return;
+    child.once("exit", () => {
+      const current = store.get(workerId);
+      if (!current || isTerminalStatus(current.status)) return;
+      clearWorkerWatchdog(watchdogs, workerId);
+      store.update(workerId, {
+        status: "error",
+        error: "Worker process exited without reporting completion.",
+        workerPid: undefined,
+      });
+    });
+  };
 
   return {
-    get: (workerId) => store.get(workerId),
+    get: (workerId) => {
+      const record = store.get(workerId);
+      return record ? reconcile(record) : undefined;
+    },
 
     async start(input): Promise<StartWorkerResult> {
       refreshLocalAgentProviderAvailabilitySnapshot();
@@ -131,13 +218,16 @@ export function createLocalAgentOrchestrator(
         provider: selected.provider,
         model: selected.model,
         thinking: selected.thinking,
+        executionTimeoutSeconds: parseAgentsExecutionTimeoutSeconds(input.executionTimeoutSeconds),
       });
 
       const promptFile = writeAgentPromptFile(input.prompt);
       const child = await spawnWorker(record.id, promptFile);
       const workerPid = extractPid(child);
       if (workerPid) {
-        store.update(record.id, { workerPid });
+        const started = store.update(record.id, { workerPid });
+        observeWorkerExit(child, record.id);
+        armWatchdog(started);
       }
 
       return { record: store.get(record.id)!, fallbackUsed: selected.fallbackUsed };
@@ -159,6 +249,9 @@ export function createLocalAgentOrchestrator(
         latestResponse: undefined,
         error: undefined,
         workerPid: undefined,
+        executionTimeoutSeconds: parseAgentsExecutionTimeoutSeconds(
+          input.executionTimeoutSeconds ?? record.executionTimeoutSeconds,
+        ),
       });
 
       const promptFile = writeAgentPromptFile(input.prompt);
@@ -166,6 +259,8 @@ export function createLocalAgentOrchestrator(
       const workerPid = extractPid(child);
       if (workerPid) {
         record = store.update(record.id, { workerPid });
+        observeWorkerExit(child, record.id);
+        armWatchdog(record);
       }
 
       return record;
@@ -177,20 +272,23 @@ export function createLocalAgentOrchestrator(
       if (!record) {
         throw new Error(`Unknown subagent id: ${workerId}`);
       }
+      record = reconcile(record);
 
       while (!isTerminalStatus(record.status) && Date.now() < deadline) {
         await sleep(AGENTS_WAIT_POLL_MS);
-        record = store.get(workerId) ?? record;
+        const latest = store.get(workerId);
+        if (latest) record = reconcile(latest);
       }
 
       return { record, timedOut: !isTerminalStatus(record.status) };
     },
 
     async inspect(workerId, options = {}): Promise<InspectWorkerResult> {
-      const record = store.get(workerId);
-      if (!record) {
+      const stored = store.get(workerId);
+      if (!stored) {
         throw new Error(`Unknown subagent id: ${workerId}`);
       }
+      const record = reconcile(stored);
 
       const result: InspectWorkerResult = { record };
 
@@ -225,10 +323,11 @@ export function createLocalAgentOrchestrator(
     },
 
     async stop(workerId): Promise<LocalAgentRecord> {
-      const record = store.get(workerId);
-      if (!record) {
+      const stored = store.get(workerId);
+      if (!stored) {
         throw new Error(`Unknown subagent id: ${workerId}`);
       }
+      const record = reconcile(stored);
       if (isTerminalStatus(record.status)) {
         return record;
       }
@@ -237,7 +336,8 @@ export function createLocalAgentOrchestrator(
         terminateWorker(record.workerPid);
       }
 
-      return store.update(record.id, { status: "stopped" });
+      clearWorkerWatchdog(watchdogs, record.id);
+      return store.update(record.id, { status: "stopped", workerPid: undefined });
     },
 
     async executeWorker(recordId, promptFile): Promise<void> {
@@ -247,7 +347,20 @@ export function createLocalAgentOrchestrator(
       }
 
       const prompt = readFileSync(promptFile, "utf8");
-      store.update(record.id, { status: "running", error: undefined });
+      const running = store.update(record.id, { status: "running", error: undefined });
+      const executionTimer = running.executionTimeoutSeconds
+        ? setTimeout(() => {
+            const current = store.get(record.id);
+            if (!current || isTerminalStatus(current.status)) return;
+            store.update(record.id, {
+              status: "timed_out",
+              error: `Worker exceeded execution timeout of ${running.executionTimeoutSeconds}s.`,
+              workerPid: undefined,
+            });
+            terminateWorker(process.pid);
+          }, running.executionTimeoutSeconds * 1000)
+        : undefined;
+      executionTimer?.unref?.();
 
       try {
         const profiles = await loadLocalAgentProfiles(config, record.workspaceRoot);
@@ -256,17 +369,27 @@ export function createLocalAgentOrchestrator(
           ? await runProfileProvider(profile, record, prompt, runProvider)
           : await runRawProvider(record, prompt, runProvider);
 
-        store.update(record.id, {
-          providerSessionId: result.providerSessionId ?? undefined,
-          status: "idle",
-          latestResponse: result.finalResponse,
-          error: undefined,
-        });
+        const current = store.get(record.id);
+        if (current?.status !== "timed_out") {
+          store.update(record.id, {
+            providerSessionId: result.providerSessionId ?? undefined,
+            status: "idle",
+            latestResponse: result.finalResponse,
+            error: undefined,
+            workerPid: undefined,
+          });
+        }
       } catch (error) {
-        store.update(record.id, {
-          status: "error",
-          error: error instanceof Error ? error.message : String(error),
-        });
+        const current = store.get(record.id);
+        if (current?.status !== "timed_out") {
+          store.update(record.id, {
+            status: "error",
+            error: error instanceof Error ? error.message : String(error),
+            workerPid: undefined,
+          });
+        }
+      } finally {
+        if (executionTimer) clearTimeout(executionTimer);
       }
     },
   };
@@ -430,7 +553,46 @@ function assertProviderAvailable(provider: string): void {
 }
 
 function isTerminalStatus(status: LocalAgentStatus): boolean {
-  return status === "idle" || status === "error" || status === "stopped";
+  return status === "idle" || status === "error" || status === "stopped" || status === "timed_out";
+}
+
+function hasExceededExecutionTimeout(record: LocalAgentRecord): boolean {
+  if (!record.executionTimeoutSeconds) return false;
+  const startedAt = Date.parse(record.updatedAt);
+  if (!Number.isFinite(startedAt)) return false;
+  return Date.now() - startedAt >= record.executionTimeoutSeconds * 1000;
+}
+
+function isWorkerProcessAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    if (isErrnoException(error) && error.code === "ESRCH") return false;
+    return true;
+  }
+}
+
+function clearWorkerWatchdog(watchdogs: Map<string, NodeJS.Timeout>, workerId: string): void {
+  const timer = watchdogs.get(workerId);
+  if (!timer) return;
+  clearTimeout(timer);
+  watchdogs.delete(workerId);
+}
+
+export function parseAgentsExecutionTimeoutSeconds(raw: string | number | undefined): number {
+  if (raw === undefined) {
+    const env = process.env.DEVSPACE_AGENTS_EXECUTION_TIMEOUT;
+    if (env) return parseAgentsExecutionTimeoutSeconds(env);
+    return AGENTS_EXECUTION_DEFAULT_TIMEOUT_SECONDS;
+  }
+  const value = typeof raw === "number" ? raw : Number.parseInt(String(raw).trim(), 10);
+  if (!Number.isInteger(value) || value < 1 || value > AGENTS_EXECUTION_MAX_TIMEOUT_SECONDS) {
+    throw new Error(
+      `Invalid agent execution timeout: ${raw}. Expected between 1 and ${AGENTS_EXECUTION_MAX_TIMEOUT_SECONDS} seconds.`,
+    );
+  }
+  return value;
 }
 
 export function parseAgentsWaitTimeoutSeconds(raw: string | number | undefined): number {

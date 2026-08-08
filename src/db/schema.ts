@@ -105,6 +105,7 @@ export const localAgentSessions = sqliteTable(
     latestResponse: text("latest_response"),
     error: text("error"),
     workerPid: integer("worker_pid"),
+    executionTimeoutSeconds: integer("execution_timeout_seconds"),
     createdAt: text("created_at").notNull(),
     updatedAt: text("updated_at").notNull(),
   },

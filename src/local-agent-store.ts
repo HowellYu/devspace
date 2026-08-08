@@ -3,7 +3,7 @@ import { resolve } from "node:path";
 import { openDatabase, type DatabaseHandle } from "./db/client.js";
 import type { ServerConfig } from "./config.js";
 
-export type LocalAgentStatus = "starting" | "running" | "idle" | "error" | "stopped";
+export type LocalAgentStatus = "starting" | "running" | "idle" | "error" | "stopped" | "timed_out";
 
 export interface LocalAgentRecord {
   id: string;
@@ -18,6 +18,7 @@ export interface LocalAgentRecord {
   latestResponse?: string;
   error?: string;
   workerPid?: number;
+  executionTimeoutSeconds?: number;
   createdAt: string;
   updatedAt: string;
 }
@@ -30,6 +31,7 @@ export interface CreateLocalAgentRecordInput {
   model?: string;
   thinking?: string;
   workerPid?: number;
+  executionTimeoutSeconds?: number;
 }
 
 export interface LocalAgentListScope {
@@ -50,6 +52,7 @@ interface LocalAgentRow {
   latest_response: string | null;
   error: string | null;
   worker_pid: number | null;
+  execution_timeout_seconds: number | null;
   created_at: string;
   updated_at: string;
 }
@@ -99,6 +102,7 @@ export class LocalAgentStore {
       model: input.model,
       thinking: input.thinking,
       workerPid: input.workerPid,
+      executionTimeoutSeconds: input.executionTimeoutSeconds,
       status: "starting",
       createdAt: now,
       updatedAt: now,
@@ -116,9 +120,10 @@ export class LocalAgentStore {
           thinking,
           status,
           worker_pid,
+          execution_timeout_seconds,
           created_at,
           updated_at
-        ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         record.id,
@@ -130,6 +135,7 @@ export class LocalAgentStore {
         record.thinking ?? null,
         record.status,
         record.workerPid ?? null,
+        record.executionTimeoutSeconds ?? null,
         record.createdAt,
         record.updatedAt,
       );
@@ -182,6 +188,7 @@ export class LocalAgentStore {
           latest_response = ?,
           error = ?,
           worker_pid = ?,
+          execution_timeout_seconds = ?,
           updated_at = ?
          where id = ?`,
       )
@@ -197,6 +204,7 @@ export class LocalAgentStore {
         updated.latestResponse ?? null,
         updated.error ?? null,
         updated.workerPid ?? null,
+        updated.executionTimeoutSeconds ?? null,
         updated.updatedAt,
         updated.id,
       );
@@ -234,6 +242,7 @@ function rowToLocalAgentRecord(row: LocalAgentRow): LocalAgentRecord {
     latestResponse: row.latest_response ?? undefined,
     error: row.error ?? undefined,
     workerPid: row.worker_pid ?? undefined,
+    executionTimeoutSeconds: row.execution_timeout_seconds ?? undefined,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -245,7 +254,8 @@ function readStatus(status: string): LocalAgentStatus {
     status === "running" ||
     status === "idle" ||
     status === "error" ||
-    status === "stopped"
+    status === "stopped" ||
+    status === "timed_out"
   ) {
     return status;
   }

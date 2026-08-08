@@ -143,14 +143,18 @@ and reviews; workers run the local edit-test-fix loop.
 
 1. Open the workspace and write a self-contained worker prompt (goal, context,
    relevant files, acceptance criteria, rules).
-2. Start a worker: `devspace agents run luna-worker "<prompt>"`.
+2. Start a worker: `devspace agents run luna-worker "<prompt>"`. Normal runs
+   use a 600-second execution deadline. Use `--max-runtime <seconds>` only when
+   the task is known to need longer-running builds, tests, or shell commands.
 3. Wait once: `devspace agents wait <id> --timeout 300`. Do not poll
-   `agents show` in a loop; `wait` returns the final response exactly once and
-   a timeout never stops the worker.
+   `agents show` in a loop. The wait timeout only controls how long the caller
+   waits; the separate execution deadline stops overlong workers and records
+   `timed_out`.
 4. Review through the change checkpoint (`show_changes` with
    `DEVSPACE_WIDGETS=changes`) rather than rereading the repository.
 5. Send corrections as a follow-up to the same session:
-   `devspace agents run <id> "<review findings>"`. ACP providers (`cursor`,
+   `devspace agents run <id> "<review findings>"`. The worker keeps its current
+   execution deadline unless `--max-runtime` is explicitly changed. ACP providers (`cursor`,
    `copilot`, `luna`) resume the stored provider conversation through
    `session/load`. If the provider cannot load the previous session, the run
    fails instead of silently starting over.

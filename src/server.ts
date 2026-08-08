@@ -291,7 +291,7 @@ const workspaceLocalAgentOutputSchema = z.object({
   providerUnavailableReason: z.string().optional(),
 });
 
-const workerStatusSchema = z.enum(["starting", "running", "idle", "error", "stopped"]);
+const workerStatusSchema = z.enum(["starting", "running", "idle", "error", "stopped", "timed_out"]);
 
 const changedFileOutputSchema = z.object({
   path: z.string(),
@@ -315,6 +315,7 @@ const workerBaseOutputSchema = z.object({
   profile: z.string(),
   model: z.string().optional(),
   thinking: z.string().optional(),
+  executionTimeoutSeconds: z.number().int().optional(),
 });
 
 const startWorkerOutputSchema = workerBaseOutputSchema.extend({
@@ -1947,12 +1948,19 @@ function registerLocalAgentWorkerTools(
           .describe(
             "If true and the target's provider is unavailable, fall back to the first available built-in provider in deterministic order. Defaults to false.",
           ),
+        executionTimeoutSeconds: z
+          .number()
+          .int()
+          .min(1)
+          .max(7200)
+          .optional()
+          .describe("Maximum worker runtime in seconds. Defaults to 600. Raise only for tasks known to need longer-running commands."),
       },
       outputSchema: startWorkerOutputSchema,
       ...toolWidgetDescriptorMeta(config, "shell"),
       annotations: WORKER_TOOL_ANNOTATIONS.startWorker,
     },
-    async ({ workspaceId, target, prompt, model, thinking, fallback }) => {
+    async ({ workspaceId, target, prompt, model, thinking, fallback, executionTimeoutSeconds }) => {
       const startedAt = performance.now();
       const workspace = workspaces.getWorkspace(workspaceId);
       const { record, fallbackUsed } = await orchestrator.start({
@@ -1963,6 +1971,7 @@ function registerLocalAgentWorkerTools(
         model,
         thinking,
         fallback,
+        executionTimeoutSeconds,
       });
       const result = fallbackUsed
         ? `Started worker ${record.id} for ${record.profileName}. The requested provider was unavailable; fell back to ${record.provider}.`
@@ -1983,6 +1992,7 @@ function registerLocalAgentWorkerTools(
           profile: record.profileName,
           model: record.model,
           thinking: record.thinking,
+          executionTimeoutSeconds: record.executionTimeoutSeconds,
           chosenProvider: record.provider,
           chosenProfile: record.profileName,
           fallbackUsed,
@@ -1997,7 +2007,7 @@ function registerLocalAgentWorkerTools(
     {
       title: "Wait for worker",
       description:
-        "Wait until a worker reaches a terminal status (idle, error, or stopped) or the timeout expires. A timeout does not stop the worker; call wait_worker again to keep waiting.",
+        "Wait until a worker reaches a terminal status (idle, error, stopped, or timed_out) or the wait timeout expires. The wait timeout does not stop the worker; the worker's separate execution deadline does.",
       inputSchema: {
         workspaceId: z.string().describe("Workspace identifier returned by open_workspace."),
         workerId: z.string().describe("Worker identifier returned by start_worker."),
@@ -2024,7 +2034,7 @@ function registerLocalAgentWorkerTools(
       logToolCall(config, {
         tool: toolNames.waitWorker,
         workspaceId,
-        success: !timedOut && record.status !== "error",
+        success: !timedOut && record.status !== "error" && record.status !== "timed_out",
         durationMs: Math.round(performance.now() - startedAt),
       });
       return {
@@ -2035,6 +2045,7 @@ function registerLocalAgentWorkerTools(
           status: record.status,
           provider: record.provider,
           profile: record.profileName,
+          executionTimeoutSeconds: record.executionTimeoutSeconds,
           latestResponse: record.latestResponse,
           error: record.error,
           timedOut,
@@ -2079,6 +2090,7 @@ function registerLocalAgentWorkerTools(
           profile: record.profileName,
           model: record.model,
           thinking: record.thinking,
+          executionTimeoutSeconds: record.executionTimeoutSeconds,
           latestResponse: record.latestResponse,
           error: record.error,
           providerSessionId: record.providerSessionId,
@@ -2102,15 +2114,22 @@ function registerLocalAgentWorkerTools(
         prompt: z.string().min(1).describe("Follow-up prompt for the worker."),
         model: z.string().optional().describe("Optional model override for the provider."),
         thinking: z.string().optional().describe("Optional thinking/effort level override."),
+        executionTimeoutSeconds: z
+          .number()
+          .int()
+          .min(1)
+          .max(7200)
+          .optional()
+          .describe("Maximum runtime for this continuation in seconds. Defaults to the worker's current runtime limit."),
       },
       outputSchema: workerBaseOutputSchema,
       ...toolWidgetDescriptorMeta(config, "shell"),
       annotations: WORKER_TOOL_ANNOTATIONS.continueWorker,
     },
-    async ({ workspaceId, workerId, prompt, model, thinking }) => {
+    async ({ workspaceId, workerId, prompt, model, thinking, executionTimeoutSeconds }) => {
       const startedAt = performance.now();
       workspaces.getWorkspace(workspaceId);
-      const record = await orchestrator.continue(workerId, { prompt, model, thinking });
+      const record = await orchestrator.continue(workerId, { prompt, model, thinking, executionTimeoutSeconds });
       const result = `Continuing worker ${record.id} for ${record.profileName} using ${record.provider}.`;
       logToolCall(config, {
         tool: toolNames.continueWorker,
@@ -2128,6 +2147,7 @@ function registerLocalAgentWorkerTools(
           profile: record.profileName,
           model: record.model,
           thinking: record.thinking,
+          executionTimeoutSeconds: record.executionTimeoutSeconds,
         },
       };
     },
