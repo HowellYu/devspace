@@ -9,6 +9,7 @@ export interface LocalAgentRecord {
   id: string;
   workspaceId?: string;
   workspaceRoot: string;
+  grantScopeRoot?: string;
   profileName: string;
   provider: string;
   model?: string;
@@ -26,6 +27,7 @@ export interface LocalAgentRecord {
 export interface CreateLocalAgentRecordInput {
   workspaceId?: string;
   workspaceRoot: string;
+  grantScopeRoot?: string;
   profileName: string;
   provider: string;
   model?: string;
@@ -43,6 +45,7 @@ interface LocalAgentRow {
   id: string;
   workspace_id: string | null;
   workspace_root: string;
+  grant_scope_root: string | null;
   profile_name: string;
   provider: string;
   model: string | null;
@@ -97,6 +100,7 @@ export class LocalAgentStore {
       id: `agt_${randomUUID().replaceAll("-", "").slice(0, 8)}`,
       workspaceId: input.workspaceId,
       workspaceRoot: resolve(input.workspaceRoot),
+      grantScopeRoot: input.grantScopeRoot ? resolve(input.grantScopeRoot) : undefined,
       profileName: input.profileName,
       provider: input.provider,
       model: input.model,
@@ -114,6 +118,7 @@ export class LocalAgentStore {
           id,
           workspace_id,
           workspace_root,
+          grant_scope_root,
           profile_name,
           provider,
           model,
@@ -123,12 +128,13 @@ export class LocalAgentStore {
           execution_timeout_seconds,
           created_at,
           updated_at
-        ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         record.id,
         record.workspaceId ?? null,
         record.workspaceRoot,
+        record.grantScopeRoot ?? null,
         record.profileName,
         record.provider,
         record.model ?? null,
@@ -179,6 +185,7 @@ export class LocalAgentStore {
         `update local_agent_sessions set
           workspace_id = ?,
           workspace_root = ?,
+          grant_scope_root = ?,
           profile_name = ?,
           provider = ?,
           model = ?,
@@ -195,6 +202,7 @@ export class LocalAgentStore {
       .run(
         updated.workspaceId ?? null,
         resolve(updated.workspaceRoot),
+        updated.grantScopeRoot ? resolve(updated.grantScopeRoot) : null,
         updated.profileName,
         updated.provider,
         updated.model ?? null,
@@ -233,6 +241,7 @@ function rowToLocalAgentRecord(row: LocalAgentRow): LocalAgentRecord {
     id: row.id,
     workspaceId: row.workspace_id ?? undefined,
     workspaceRoot: row.workspace_root,
+    grantScopeRoot: row.grant_scope_root ?? undefined,
     profileName: row.profile_name,
     provider: row.provider,
     model: row.model ?? undefined,

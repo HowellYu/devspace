@@ -1,12 +1,13 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { mkdtemp, mkdir, rm, stat, symlink, writeFile } from "node:fs/promises";
-import { platform, tmpdir } from "node:os";
+import { homedir, platform, tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { type TestContext } from "node:test";
 import { promisify } from "node:util";
 import { loadConfig, type ServerConfig } from "./config.js";
 import { GitWorktreeError } from "./git-worktrees.js";
+import { createPathGrantStore } from "./path-grants.js";
 import { SqliteWorkspaceStore } from "./workspace-store.js";
 import { WorkspaceRegistry } from "./workspaces.js";
 
@@ -173,6 +174,69 @@ interface WorkspaceFixture {
   config: ServerConfig;
   registry: WorkspaceRegistry;
 }
+
+test("scoped grants add and revoke external read/write access and follow worktrees", async (t) => {
+  if (platform() === "win32") return;
+  const base = await mkdtemp(join(homedir(), ".devspace-workspace-grant-test-"));
+  const stateDir = await mkdtemp(join(tmpdir(), "devspace-workspace-grant-state-"));
+  const sourceParent = join(base, "source-parent");
+  const external = join(base, "external");
+  await mkdir(sourceParent);
+  await mkdir(external);
+  await writeFile(join(external, "shared.txt"), "shared\n");
+  const gitRoot = await createGitProject(sourceParent);
+
+  const config = loadConfig({
+    DEVSPACE_CONFIG_DIR: join(base, ".config"),
+    DEVSPACE_ALLOWED_ROOTS: gitRoot,
+    DEVSPACE_WORKTREE_ROOT: join(base, ".worktrees"),
+    DEVSPACE_STATE_DIR: stateDir,
+    DEVSPACE_OAUTH_OWNER_TOKEN: "test-owner-token-that-is-long-enough",
+    PORT: "1",
+  });
+  const grants = createPathGrantStore(stateDir);
+  const readGrant = grants.add({
+    workspaceRoot: gitRoot,
+    path: external,
+    access: "read",
+    persistent: true,
+  });
+  const registry = new WorkspaceRegistry(config, undefined, grants);
+
+  const checkout = await registry.openWorkspace(gitRoot);
+  assert.equal(
+    registry.resolveReadPath(checkout.workspace, join(external, "shared.txt")).absolutePath,
+    join(external, "shared.txt"),
+  );
+  assert.throws(
+    () => registry.resolveWritePath(checkout.workspace, join(external, "shared.txt")),
+    /outside allowed roots/,
+  );
+
+  const worktree = await registry.openWorkspace({ path: gitRoot, mode: "worktree" });
+  assert.equal(registry.grantScopeRoot(worktree.workspace), gitRoot);
+  assert.equal(
+    registry.resolveReadPath(worktree.workspace, join(external, "shared.txt")).absolutePath,
+    join(external, "shared.txt"),
+  );
+
+  grants.add({ workspaceRoot: gitRoot, path: external, access: "readwrite", persistent: true });
+  assert.equal(
+    registry.resolveWritePath(checkout.workspace, join(external, "shared.txt")),
+    join(external, "shared.txt"),
+  );
+
+  grants.remove(readGrant.id);
+  assert.throws(
+    () => registry.resolveReadPath(checkout.workspace, join(external, "shared.txt")),
+    /outside allowed roots/,
+  );
+
+  t.after(async () => {
+    await rm(base, { recursive: true, force: true });
+    await rm(stateDir, { recursive: true, force: true });
+  });
+});
 
 async function fixture(t: TestContext): Promise<WorkspaceFixture> {
   const root = await mkdtemp(join(tmpdir(), "devspace-workspace-test-"));

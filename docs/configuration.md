@@ -24,6 +24,9 @@ npx @waishnav/devspace serve
 npx @waishnav/devspace doctor
 npx @waishnav/devspace config get
 npx @waishnav/devspace config set publicBaseUrl https://devspace.example.com
+npx @waishnav/devspace access list
+npx @waishnav/devspace access add /absolute/project/path
+npx @waishnav/devspace grants add /absolute/extra/path --workspace /absolute/project/path --access read --ttl 3600
 npx @waishnav/devspace service install    # macOS only
 npx @waishnav/devspace service uninstall  # macOS only
 ```
@@ -39,7 +42,45 @@ npx @waishnav/devspace service uninstall  # macOS only
 | `DEVSPACE_ALLOWED_HOSTS` | Optional Host header allowlist override. |
 | `DEVSPACE_OAUTH_OWNER_TOKEN` | Owner password for OAuth approval. Must be at least 16 characters. |
 | `DEVSPACE_WORKTREE_ROOT` | Directory for managed Git worktrees. Defaults to `~/.devspace/worktrees`. |
-| `DEVSPACE_STATE_DIR` | Directory for SQLite state and legacy global project-memory fallback. Defaults to `~/.local/share/devspace`. |
+| `DEVSPACE_STATE_DIR` | Directory for SQLite state, local grant records, and legacy global project-memory fallback. Defaults to `~/.local/share/devspace`. |
+
+## Project authorization and scoped path grants
+
+`devspace access` is the local control-plane command for persisted project roots.
+It updates `allowedRoots` in `~/.devspace/config.json` without reading or changing
+`auth.json`. Broad roots such as the home directory, Desktop root, `~/.codex`,
+and DevSpace control-plane directories are rejected. Changes take effect after
+the running DevSpace service is restarted/reloaded.
+
+```bash
+devspace access list
+devspace access add /Users/me/projects/example
+devspace access remove /Users/me/projects/example
+```
+
+`devspace grants` gives an already-authorized project access to an additional
+existing directory without broadening the global project whitelist. Grant state
+and its append-only audit log live under `DEVSPACE_STATE_DIR`, not in the repo,
+so the workspace cannot edit its own grants. Grants are scoped to the canonical
+project root and therefore follow managed worktrees.
+
+```bash
+devspace grants list --workspace /Users/me/projects/example
+devspace grants add /Users/me/data/reference \
+  --workspace /Users/me/projects/example \
+  --access read --ttl 3600 --reason "reference dataset"
+devspace grants add /Users/me/output \
+  --workspace /Users/me/projects/example \
+  --access readwrite --persistent
+devspace grants remove grant_0123456789
+```
+
+Temporary grants default to one hour. `--ttl` accepts up to 30 days;
+`--persistent` creates a non-expiring grant. Generic grants reject system trees,
+DevSpace state/config, SSH/cloud credential directories, broad home roots, and
+`~/.codex`. Provider credentials use a separate narrow mechanism rather than a
+generic path grant. Grant mutation is intentionally **not** exposed as an MCP
+tool, so a remote workspace cannot approve its own privilege expansion.
 
 ## Native Artifact Download
 

@@ -34,11 +34,13 @@ import type { LocalAgentRunInput, LocalAgentRunResult } from "./local-agent-runt
 import type { ReviewCheckpointManager } from "./review-checkpoints.js";
 import { resolveDevspaceCliPath } from "./service.js";
 import { buildSafeChildEnvironment } from "./process-environment.js";
+import { createPathGrantStore } from "./path-grants.js";
 import type { ServerConfig } from "./config.js";
 
 export interface StartWorkerInput {
   workspaceId?: string;
   workspaceRoot: string;
+  grantScopeRoot?: string;
   target: string;
   prompt: string;
   model?: string;
@@ -224,6 +226,7 @@ export function createLocalAgentOrchestrator(
       const record = store.create({
         workspaceId: input.workspaceId,
         workspaceRoot: input.workspaceRoot,
+        grantScopeRoot: input.grantScopeRoot ?? input.workspaceRoot,
         profileName: target.name,
         provider: selected.provider,
         model: selected.model,
@@ -419,13 +422,21 @@ function defaultSpawnWorker(config: ServerConfig, record: LocalAgentRecord, prom
       promptFile,
     ],
   };
+  const grantStore = createPathGrantStore(config.stateDir);
+  const grantScopeRoot = record.grantScopeRoot ?? record.workspaceRoot;
   const command = shouldUseMacosSandbox(config)
     ? wrapMacosSandboxCommand(baseCommand, {
         workspaceRoot: record.workspaceRoot,
         stateDir: config.stateDir,
-        readPaths: workerSandboxReadPaths(config, record.provider),
+        readPaths: [
+          ...workerSandboxReadPaths(config, record.provider),
+          ...grantStore.readRoots(grantScopeRoot),
+        ],
         readFiles: [join(dirname(config.devspaceAgentsDir), "config.json")],
-        writePaths: config.sandboxWritePaths,
+        writePaths: [
+          ...config.sandboxWritePaths,
+          ...grantStore.writeRoots(grantScopeRoot),
+        ],
         allowNetwork: config.sandboxNetwork,
       })
     : baseCommand;

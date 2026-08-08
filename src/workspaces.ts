@@ -11,6 +11,7 @@ import { loadProjectContextFiles } from "@earendil-works/pi-coding-agent";
 import type { ServerConfig } from "./config.js";
 import { createManagedWorktree } from "./git-worktrees.js";
 import { localMemoryNamespacePath, memoryNamespaceId } from "./project-memory.js";
+import type { PathGrantStore } from "./path-grants.js";
 import {
   AccessDeniedError,
   assertAllowedPath,
@@ -96,6 +97,7 @@ export class WorkspaceRegistry {
   constructor(
     private readonly config: ServerConfig,
     private readonly store?: WorkspaceStore,
+    private readonly pathGrants?: PathGrantStore,
   ) {}
 
   async openWorkspace(
@@ -292,10 +294,11 @@ export class WorkspaceRegistry {
   }
 
   resolveReadPath(workspace: Workspace, inputPath: string): WorkspaceReadPath {
+    const readRoots = this.readRoots(workspace);
     try {
       return {
-        absolutePath: this.resolvePath(workspace, inputPath),
-        readRoots: [workspace.root],
+        absolutePath: resolveAllowedPath(inputPath, workspace.root, readRoots),
+        readRoots,
       };
     } catch (workspaceError) {
       const skillRead = resolveSkillReadPath(
@@ -307,10 +310,28 @@ export class WorkspaceRegistry {
 
       return {
         absolutePath: skillRead.absolutePath,
-        readRoots: [workspace.root, skillRead.skill.baseDir],
+        readRoots: [...readRoots, skillRead.skill.baseDir],
         skillRead,
       };
     }
+  }
+
+  resolveWritePath(workspace: Workspace, inputPath: string): string {
+    return resolveAllowedPath(inputPath, workspace.root, this.writeRoots(workspace));
+  }
+
+  readRoots(workspace: Workspace): string[] {
+    const grants = this.pathGrants?.readRoots(this.grantScopeRoot(workspace)) ?? [];
+    return Array.from(new Set([workspace.root, ...grants]));
+  }
+
+  writeRoots(workspace: Workspace): string[] {
+    const grants = this.pathGrants?.writeRoots(this.grantScopeRoot(workspace)) ?? [];
+    return Array.from(new Set([workspace.root, ...grants]));
+  }
+
+  grantScopeRoot(workspace: Workspace): string {
+    return workspace.sourceRoot ?? workspace.root;
   }
 
   markReadPathLoaded(workspace: Workspace, readPath: WorkspaceReadPath): void {

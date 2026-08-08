@@ -1,7 +1,9 @@
 #!/usr/bin/env node
+import { realpathSync, statSync } from "node:fs";
 import { createRequire } from "node:module";
+import { homedir } from "node:os";
 import { stdin as input, stdout as output } from "node:process";
-import { resolve } from "node:path";
+import { join, resolve } from "node:path";
 import * as prompts from "@clack/prompts";
 import { satisfies } from "semver";
 import { loadConfig } from "./config.js";
@@ -35,7 +37,12 @@ import {
   writeDevspaceConfig,
   type DevspaceUserConfig,
 } from "./user-config.js";
-import { expandHomePath } from "./roots.js";
+import { expandHomePath, isPathInsideRoot } from "./roots.js";
+import {
+  createPathGrantStore,
+  validatePathGrantAccess,
+  validateTtlSeconds,
+} from "./path-grants.js";
 import {
   installLaunchdService,
   launchdServiceIsInstalled,
@@ -45,7 +52,7 @@ import {
 } from "./service.js";
 import { shutdownHttpServer } from "./server-shutdown.js";
 
-type Command = "serve" | "init" | "doctor" | "config" | "agents" | "service" | "help" | "version";
+type Command = "serve" | "init" | "doctor" | "config" | "access" | "grants" | "agents" | "service" | "help" | "version";
 const require = createRequire(import.meta.url);
 const SUPPORTED_NODE_RANGE = ">=20.12 <27";
 
@@ -69,6 +76,12 @@ async function main(argv: string[]): Promise<void> {
     case "config":
       runConfigCommand(args);
       return;
+    case "access":
+      runAccessCommand(args);
+      return;
+    case "grants":
+      runGrantsCommand(args);
+      return;
     case "agents":
       await runAgentsCommand(args);
       return;
@@ -86,7 +99,7 @@ async function main(argv: string[]): Promise<void> {
 
 function normalizeCommand(command: string | undefined): Command {
   if (!command || command === "serve" || command === "start") return "serve";
-  if (command === "init" || command === "doctor" || command === "config" || command === "agents" || command === "service") return command;
+  if (command === "init" || command === "doctor" || command === "config" || command === "access" || command === "grants" || command === "agents" || command === "service") return command;
   if (command === "help" || command === "--help" || command === "-h") return "help";
   if (command === "version" || command === "--version" || command === "-v") return "version";
   throw new Error(`Unknown command: ${command}`);
@@ -332,6 +345,228 @@ function runConfigCommand(args: string[]): void {
   console.log(`Updated ${files.configPath}`);
 }
 
+function runAccessCommand(args: string[]): void {
+  const [subcommand, path, ...extra] = args;
+  const files = loadDevspaceFiles();
+  const roots = (files.config.allowedRoots ?? []).map((root) => resolve(expandHomePath(root)));
+
+  if (!subcommand || subcommand === "list" || subcommand === "ls") {
+    if (path || extra.length > 0) throw new Error("Usage: devspace access list");
+    if (roots.length === 0) {
+      console.log("No persisted project roots are authorized.");
+      return;
+    }
+    for (const root of roots) console.log(root);
+    return;
+  }
+
+  if (subcommand !== "add" && subcommand !== "remove" && subcommand !== "rm") {
+    throw new Error(`Unknown access command: ${subcommand}`);
+  }
+  if (!path || extra.length > 0) {
+    throw new Error(`Usage: devspace access ${subcommand === "add" ? "add" : "remove"} <project-root>`);
+  }
+
+  if (subcommand === "add") {
+    const canonical = validateProjectAccessRoot(path, files.dir);
+    if (roots.includes(canonical)) {
+      console.log(`Already authorized: ${canonical}`);
+      return;
+    }
+    writeDevspaceConfig({
+      ...files.config,
+      allowedRoots: [...roots, canonical],
+    });
+    console.log(`Authorized project root: ${canonical}`);
+    console.log("Restart/reload DevSpace for a running server to use the updated root list.");
+    return;
+  }
+
+  const requested = canonicalPathIfPresent(path);
+  const remaining = roots.filter((root) => root !== requested && canonicalPathIfPresent(root) !== requested);
+  if (remaining.length === roots.length) {
+    throw new Error(`Project root is not authorized: ${requested}`);
+  }
+  writeDevspaceConfig({
+    ...files.config,
+    allowedRoots: remaining,
+  });
+  console.log(`Removed authorized project root: ${requested}`);
+  console.log("Restart/reload DevSpace for a running server to use the updated root list.");
+}
+
+function validateProjectAccessRoot(path: string, configDir: string): string {
+  const canonical = canonicalPathIfPresent(path, true);
+  if (!statSync(canonical).isDirectory()) {
+    throw new Error(`Project root must be a directory: ${path}`);
+  }
+
+  const home = resolve(homedir());
+  const exactBlocked = [
+    "/",
+    home,
+    join(home, "Desktop"),
+    join(home, "Documents"),
+    join(home, "Downloads"),
+    join(home, ".codex"),
+    resolve(configDir),
+  ];
+  if (exactBlocked.includes(canonical)) {
+    throw new Error(`Project root is too broad or security-sensitive: ${canonical}`);
+  }
+
+  const blockedTrees = [
+    "/System",
+    "/etc",
+    "/private",
+    "/usr",
+    "/bin",
+    "/sbin",
+    "/Library",
+    join(home, ".ssh"),
+    join(home, ".gnupg"),
+    join(home, ".aws"),
+    join(home, ".devspace"),
+  ].map((value) => resolve(value));
+  const blocked = blockedTrees.find((root) => isPathInsideRoot(canonical, root));
+  if (blocked) {
+    throw new Error(`Project root is security-sensitive and cannot be authorized: ${canonical}`);
+  }
+  return canonical;
+}
+
+function canonicalPathIfPresent(path: string, required = false): string {
+  const absolute = resolve(expandHomePath(path));
+  try {
+    return realpathSync.native(absolute);
+  } catch {
+    if (required) throw new Error(`Project root does not exist: ${path}`);
+    return absolute;
+  }
+}
+
+function runGrantsCommand(args: string[]): void {
+  const [subcommand, ...rest] = args;
+  const config = loadConfig();
+  const store = createPathGrantStore(config.stateDir);
+
+  if (!subcommand || subcommand === "help" || subcommand === "--help" || subcommand === "-h") {
+    console.log([
+      "DevSpace path grants (local control plane only)",
+      "",
+      "Usage:",
+      "  devspace grants list [--workspace <project-root>]",
+      "  devspace grants add <path> --workspace <project-root> --access <read|readwrite> [--ttl <seconds>|--persistent] [--reason <text>]",
+      "  devspace grants remove <grant-id>",
+      "",
+      "Temporary grants default to one hour when neither --ttl nor --persistent is supplied.",
+    ].join("\n"));
+    return;
+  }
+
+  if (subcommand === "list") {
+    let workspaceRoot: string | undefined;
+    for (let index = 0; index < rest.length; index += 1) {
+      const flag = rest[index];
+      if (flag !== "--workspace") throw new Error(`Unknown grants list argument: ${flag}`);
+      workspaceRoot = rest[index + 1];
+      if (!workspaceRoot) throw new Error("Missing value for --workspace.");
+      index += 1;
+    }
+    const grants = store.list(workspaceRoot);
+    if (grants.length === 0) {
+      console.log("No active path grants.");
+      return;
+    }
+    for (const grant of grants) {
+      console.log([
+        grant.id,
+        grant.access,
+        grant.path,
+        `workspace=${grant.workspaceRoot}`,
+        grant.expiresAt ? `expires=${grant.expiresAt}` : "persistent",
+      ].join(" "));
+    }
+    return;
+  }
+
+  if (subcommand === "remove") {
+    const [id, ...extra] = rest;
+    if (!id || extra.length > 0) throw new Error("Usage: devspace grants remove <grant-id>");
+    const removed = store.remove(id);
+    if (!removed) throw new Error(`Unknown path grant: ${id}`);
+    console.log(`Revoked ${removed.id}: ${removed.path}`);
+    return;
+  }
+
+  if (subcommand !== "add") throw new Error(`Unknown grants command: ${subcommand}`);
+  const [path, ...options] = rest;
+  if (!path) {
+    throw new Error("Usage: devspace grants add <path> --workspace <project-root> --access <read|readwrite> [--ttl <seconds>|--persistent] [--reason <text>]");
+  }
+
+  let workspaceRoot: string | undefined;
+  let access: "read" | "readwrite" | undefined;
+  let ttlSeconds: number | undefined;
+  let persistent = false;
+  let reason: string | undefined;
+  for (let index = 0; index < options.length; index += 1) {
+    const flag = options[index];
+    if (flag === "--workspace") {
+      workspaceRoot = options[index + 1];
+      if (!workspaceRoot) throw new Error("Missing value for --workspace.");
+      index += 1;
+      continue;
+    }
+    if (flag === "--access") {
+      const raw = options[index + 1];
+      if (!raw) throw new Error("Missing value for --access.");
+      access = validatePathGrantAccess(raw);
+      index += 1;
+      continue;
+    }
+    if (flag === "--ttl") {
+      const raw = options[index + 1];
+      if (!raw || !/^\d+$/.test(raw)) throw new Error("--ttl must be an integer number of seconds.");
+      ttlSeconds = validateTtlSeconds(Number(raw));
+      index += 1;
+      continue;
+    }
+    if (flag === "--persistent") {
+      persistent = true;
+      continue;
+    }
+    if (flag === "--reason") {
+      reason = options[index + 1];
+      if (!reason) throw new Error("Missing value for --reason.");
+      index += 1;
+      continue;
+    }
+    throw new Error(`Unknown grants add argument: ${flag}`);
+  }
+
+  if (!workspaceRoot) throw new Error("--workspace is required for a path grant.");
+  if (!access) throw new Error("--access read|readwrite is required for a path grant.");
+  if (persistent && ttlSeconds !== undefined) {
+    throw new Error("Use either --ttl or --persistent, not both.");
+  }
+
+  const grant = store.add({
+    workspaceRoot,
+    path,
+    access,
+    ttlSeconds,
+    persistent,
+    reason,
+  });
+  console.log([
+    `Granted ${grant.id}:`,
+    `${grant.access} ${grant.path}`,
+    `workspace=${grant.workspaceRoot}`,
+    grant.expiresAt ? `expires=${grant.expiresAt}` : "persistent",
+  ].join(" "));
+}
+
 function printHelp(): void {
   console.log(
     [
@@ -344,6 +579,8 @@ function printHelp(): void {
       "  devspace doctor          Show config, runtime, network, and provider status",
       "  devspace config get      Print persisted config",
       "  devspace config set publicBaseUrl <url|null>",
+      "  devspace access ...      Manage persisted authorized project roots locally",
+      "  devspace grants ...      Manage local-only scoped extra-path grants",
       "  devspace agents ls       List subagent sessions",
       "  devspace agents run <profile-or-provider-or-id> [--model <model>] [--thinking <level>] [--max-runtime <seconds>] <prompt>",
       "  devspace agents show <id>",

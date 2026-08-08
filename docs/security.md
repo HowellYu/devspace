@@ -122,7 +122,7 @@ to local providers such as `luna`, `codex`, or `claude`. On macOS, DevSpace now
 wraps workspace shell sessions and detached worker processes with Seatbelt
 (`sandbox-exec`) by default. The policy blocks reads under other user/volume
 paths and blocks writes globally except the current workspace, DevSpace state,
-temporary storage, and explicitly configured sandbox grants. Network access is
+temporary storage, and explicitly approved scoped path grants. Network access is
 allowed by default because model providers and common development commands need
 it; set `DEVSPACE_SANDBOX_NETWORK=0` to deny it.
 
@@ -151,8 +151,28 @@ locale, shell/user), explicitly supported DevSpace operational variables, and
 provider executable-path overrides when needed. It does **not** implicitly
 forward `SSH_AUTH_SOCK`, cloud credentials, API keys, database URLs, or arbitrary
 parent-process environment variables. A provider that genuinely requires a
-credential must receive it through an explicit credential/grant mechanism rather
+credential must receive it through an explicit provider credential mechanism rather
 than widening the global child environment.
+
+## Project authorization and scoped grants
+
+Persisted project authorization is a local control-plane action (`devspace access`).
+It is intentionally not exposed through MCP, and it changes only the persisted
+`allowedRoots` configuration, never `auth.json`. DevSpace rejects broad or
+security-sensitive roots such as the home directory, Desktop root, system trees,
+`~/.devspace`, and exact `~/.codex`.
+
+Additional filesystem access for an already-authorized project uses `devspace
+grants`. Grant records and their audit log live under `DEVSPACE_STATE_DIR`, outside
+the project, so a remotely writable workspace cannot edit its own grant state.
+Grants are scoped to the canonical project root, can be `read` or `readwrite`,
+can expire, and are shared by managed worktrees for that project. Revocation is
+consumed dynamically by file tools and new process/worker sandboxes.
+
+Generic grants reject DevSpace control-plane paths, SSH/cloud credential trees,
+system directories, broad home roots, and `~/.codex`. Provider credentials are a
+separate security surface rather than an excuse to grant an entire credential
+directory. A remote MCP session cannot create, approve, or revoke path grants.
 
 ## Logs
 

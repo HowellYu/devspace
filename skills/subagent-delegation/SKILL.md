@@ -89,10 +89,15 @@ risk-reduction boundary, not a complete security guarantee: provider auth/config
 reads may still require narrowly scoped exceptions, and Apple has deprecated
 `sandbox-exec`. Child environments are default-deny and do not inherit arbitrary
 API keys, cloud credentials, database URLs, or `SSH_AUTH_SOCK` from DevSpace.
-Extra filesystem paths must be explicit through the supported grant/config
-surface; do not broaden them silently. For the strongest isolation, recommend a
-dedicated, non-administrator OS account with filesystem permissions only for
-intended projects and DevSpace state.
+Extra filesystem paths must be explicit through the local control-plane grant
+surface; do not broaden them silently. `devspace access add/remove/list` manages
+whole authorized project roots, while `devspace grants add/remove/list` manages
+scoped `read`/`readwrite` extra paths for one canonical project. These mutation
+surfaces are deliberately not MCP tools: if a worker needs a new path, report the
+exact path and required access and escalate to the user/local steward rather than
+trying to self-authorize. For the strongest isolation, recommend a dedicated,
+non-administrator OS account with filesystem permissions only for intended
+projects and DevSpace state.
 
 ## Choosing a profile
 

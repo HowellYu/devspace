@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFile, execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { loadConfig } from "./config.js";
@@ -96,6 +96,95 @@ try {
   }).subagents, true);
 } finally {
   rmSync(root, { recursive: true, force: true });
+}
+
+// devspace access (local-only persisted project authorization)
+
+if (process.platform !== "win32") {
+  const accessRoot = mkdtempSync(join(homedir(), ".devspace-cli-access-test-"));
+  const configDir = join(accessRoot, ".config");
+  const projectRoot = join(accessRoot, "project");
+  mkdirSync(configDir, { recursive: true });
+  mkdirSync(projectRoot, { recursive: true });
+  const accessEnv = { ...process.env, DEVSPACE_CONFIG_DIR: configDir };
+  const runAccessCli = (args: string[]): string =>
+    execFileSync("node", ["--import", "tsx", "src/cli.ts", ...args], {
+      cwd: process.cwd(),
+      encoding: "utf8",
+      env: accessEnv,
+    });
+
+  try {
+    assert.match(runAccessCli(["access", "add", projectRoot]), /Authorized project root/);
+    assert.match(runAccessCli(["access", "list"]), new RegExp(projectRoot.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+    assert.match(runAccessCli(["access", "remove", projectRoot]), /Removed authorized project root/);
+    assert.match(runAccessCli(["access", "list"]), /No persisted project roots are authorized/);
+
+    assert.throws(
+      () => runAccessCli(["access", "add", homedir()]),
+      /Command failed/,
+    );
+  } finally {
+    rmSync(accessRoot, { recursive: true, force: true });
+  }
+}
+
+// devspace grants (local-only scoped filesystem grants)
+
+if (process.platform !== "win32") {
+  const grantRoot = mkdtempSync(join(homedir(), ".devspace-cli-grants-test-"));
+  const stateDir = mkdtempSync(join(tmpdir(), "devspace-cli-grants-state-"));
+  const configDir = join(grantRoot, ".config");
+  const projectRoot = join(grantRoot, "project");
+  const externalRoot = join(grantRoot, "external");
+  mkdirSync(configDir, { recursive: true });
+  mkdirSync(projectRoot, { recursive: true });
+  mkdirSync(externalRoot, { recursive: true });
+
+  const grantEnv = {
+    ...process.env,
+    DEVSPACE_CONFIG_DIR: configDir,
+    DEVSPACE_ALLOWED_ROOTS: projectRoot,
+    DEVSPACE_STATE_DIR: stateDir,
+    DEVSPACE_OAUTH_OWNER_TOKEN: "test-owner-token-that-is-long-enough",
+  };
+  const runGrantCli = (args: string[]): string =>
+    execFileSync("node", ["--import", "tsx", "src/cli.ts", ...args], {
+      cwd: process.cwd(),
+      encoding: "utf8",
+      env: grantEnv,
+    });
+
+  try {
+    const added = runGrantCli([
+      "grants",
+      "add",
+      externalRoot,
+      "--workspace",
+      projectRoot,
+      "--access",
+      "read",
+      "--ttl",
+      "60",
+      "--reason",
+      "cli-test",
+    ]);
+    const grantId = added.match(/Granted (grant_[a-f0-9]+):/)?.[1];
+    assert.ok(grantId);
+    assert.match(added, / read /);
+    assert.match(added, /expires=/);
+
+    const listed = runGrantCli(["grants", "list", "--workspace", projectRoot]);
+    assert.match(listed, new RegExp(grantId));
+    assert.match(listed, new RegExp(externalRoot.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+
+    const removed = runGrantCli(["grants", "remove", grantId]);
+    assert.match(removed, /Revoked/);
+    assert.match(runGrantCli(["grants", "list", "--workspace", projectRoot]), /No active path grants/);
+  } finally {
+    rmSync(grantRoot, { recursive: true, force: true });
+    rmSync(stateDir, { recursive: true, force: true });
+  }
 }
 
 // devspace agents wait

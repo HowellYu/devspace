@@ -54,6 +54,7 @@ import {
   createProjectMemoryManager,
   type ProjectMemoryManager,
 } from "./project-memory.js";
+import { createPathGrantStore } from "./path-grants.js";
 import { openAiConversationScopeId } from "./request-meta.js";
 import { shutdownHttpServer } from "./server-shutdown.js";
 import { formatPathForPrompt } from "./skills.js";
@@ -683,6 +684,8 @@ function registerCodexProcessTools(
         command: cmd,
         cwd,
         workspaceRoot: workspace.root,
+        sandboxReadPaths: workspaces.readRoots(workspace),
+        sandboxWritePaths: workspaces.writeRoots(workspace),
         tty,
         columns,
         rows,
@@ -1320,10 +1323,11 @@ export function createMcpServer(
     async ({ workspaceId, ...input }) => {
       const startedAt = performance.now();
       const workspace = workspaces.getWorkspace(workspaceId);
-      workspaces.resolvePath(workspace, input.path);
-      const response = await writeFileTool(input, {
+      const absolutePath = workspaces.resolveWritePath(workspace, input.path);
+      const response = await writeFileTool({ ...input, path: absolutePath }, {
         cwd: workspace.root,
         root: workspace.root,
+        writeRoots: workspaces.writeRoots(workspace),
       });
 
       if (response.isError) {
@@ -1407,10 +1411,11 @@ export function createMcpServer(
     async ({ workspaceId, ...input }) => {
       const startedAt = performance.now();
       const workspace = workspaces.getWorkspace(workspaceId);
-      workspaces.resolvePath(workspace, input.path);
-      const response = await editFileTool(input, {
+      const absolutePath = workspaces.resolveWritePath(workspace, input.path);
+      const response = await editFileTool({ ...input, path: absolutePath }, {
         cwd: workspace.root,
         root: workspace.root,
+        writeRoots: workspaces.writeRoots(workspace),
       });
 
       if (response.isError) {
@@ -1620,11 +1625,15 @@ export function createMcpServer(
       async ({ workspaceId, ...input }) => {
         const startedAt = performance.now();
         const workspace = workspaces.getWorkspace(workspaceId);
-        if (input.path) workspaces.resolvePath(workspace, input.path);
-        const response = await grepFilesTool(input, {
-          cwd: workspace.root,
-          root: workspace.root,
-        });
+        const readPath = input.path ? workspaces.resolveReadPath(workspace, input.path) : undefined;
+        const response = await grepFilesTool(
+          readPath ? { ...input, path: readPath.absolutePath } : input,
+          {
+            cwd: workspace.root,
+            root: workspace.root,
+            readRoots: readPath?.readRoots ?? workspaces.readRoots(workspace),
+          },
+        );
 
         if (response.isError) {
           logFailedToolResponse(config, {
@@ -1690,11 +1699,15 @@ export function createMcpServer(
       async ({ workspaceId, ...input }) => {
         const startedAt = performance.now();
         const workspace = workspaces.getWorkspace(workspaceId);
-        if (input.path) workspaces.resolvePath(workspace, input.path);
-        const response = await findFilesTool(input, {
-          cwd: workspace.root,
-          root: workspace.root,
-        });
+        const readPath = input.path ? workspaces.resolveReadPath(workspace, input.path) : undefined;
+        const response = await findFilesTool(
+          readPath ? { ...input, path: readPath.absolutePath } : input,
+          {
+            cwd: workspace.root,
+            root: workspace.root,
+            readRoots: readPath?.readRoots ?? workspaces.readRoots(workspace),
+          },
+        );
 
         if (response.isError) {
           logFailedToolResponse(config, {
@@ -1760,10 +1773,11 @@ export function createMcpServer(
       async ({ workspaceId, ...input }) => {
         const startedAt = performance.now();
         const workspace = workspaces.getWorkspace(workspaceId);
-        workspaces.resolvePath(workspace, input.path);
-        const response = await listDirectoryTool(input, {
+        const readPath = workspaces.resolveReadPath(workspace, input.path);
+        const response = await listDirectoryTool({ ...input, path: readPath.absolutePath }, {
           cwd: workspace.root,
           root: workspace.root,
+          readRoots: readPath.readRoots,
         });
 
         if (response.isError) {
@@ -1848,6 +1862,10 @@ export function createMcpServer(
       const response = await runShellTool(input, {
         cwd,
         root: workspace.root,
+        workspaceId,
+        readRoots: workspaces.readRoots(workspace),
+        writeRoots: workspaces.writeRoots(workspace),
+        sandbox: config,
       });
 
       if (response.isError) {
@@ -1966,6 +1984,7 @@ function registerLocalAgentWorkerTools(
       const { record, fallbackUsed } = await orchestrator.start({
         workspaceId,
         workspaceRoot: workspace.root,
+        grantScopeRoot: workspaces.grantScopeRoot(workspace),
         target,
         prompt,
         model,
@@ -2218,7 +2237,8 @@ export function createServer(
     resourceMetadataUrl: getOAuthProtectedResourceMetadataUrl(resourceServerUrl),
   });
   const workspaceStore = createWorkspaceStore(config.stateDir);
-  const workspaces = new WorkspaceRegistry(config, workspaceStore);
+  const pathGrants = createPathGrantStore(config.stateDir);
+  const workspaces = new WorkspaceRegistry(config, workspaceStore, pathGrants);
   const localAgentStore = createLocalAgentStore(config);
   const localAgentOrchestrator = createLocalAgentOrchestrator(config, localAgentStore);
   const reviewCheckpoints = createReviewCheckpointManager();

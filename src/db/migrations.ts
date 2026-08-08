@@ -37,6 +37,11 @@ const migrations: Migration[] = [
     name: "local-agent-execution-timeout",
     up: migrateLocalAgentExecutionTimeout,
   },
+  {
+    version: 7,
+    name: "local-agent-grant-scope-root",
+    up: migrateLocalAgentGrantScopeRoot,
+  },
 ];
 
 export function migrateDatabase(sqlite: Database.Database): void {
@@ -164,6 +169,7 @@ function migrateLocalAgentSessions(sqlite: Database.Database): void {
       id text primary key,
       workspace_id text,
       workspace_root text not null,
+      grant_scope_root text,
       profile_name text not null,
       provider text not null,
       model text,
@@ -191,6 +197,7 @@ function migrateLocalAgentSessions(sqlite: Database.Database): void {
   addColumnIfMissing(sqlite, "local_agent_sessions", "thinking", "text");
   addColumnIfMissing(sqlite, "local_agent_sessions", "worker_pid", "integer");
   addColumnIfMissing(sqlite, "local_agent_sessions", "execution_timeout_seconds", "integer");
+  addColumnIfMissing(sqlite, "local_agent_sessions", "grant_scope_root", "text");
 }
 
 function migrateWorkspaceConversationBindings(sqlite: Database.Database): void {
@@ -218,6 +225,10 @@ function migrateLocalAgentWorkerPid(sqlite: Database.Database): void {
 
 function migrateLocalAgentExecutionTimeout(sqlite: Database.Database): void {
   addColumnIfMissing(sqlite, "local_agent_sessions", "execution_timeout_seconds", "integer");
+}
+
+function migrateLocalAgentGrantScopeRoot(sqlite: Database.Database): void {
+  addColumnIfMissing(sqlite, "local_agent_sessions", "grant_scope_root", "text");
 }
 
 function addColumnIfMissing(

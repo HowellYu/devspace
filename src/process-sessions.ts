@@ -20,6 +20,8 @@ export interface StartCommandInput {
   command: string;
   cwd: string;
   workspaceRoot?: string;
+  sandboxReadPaths?: string[];
+  sandboxWritePaths?: string[];
   tty?: boolean;
   columns?: number;
   rows?: number;
@@ -393,8 +395,14 @@ export class ProcessSessionManager {
     if (!this.sandbox || !input.workspaceRoot || !shouldUseMacosSandbox(this.sandbox)) return shell;
     return wrapMacosSandboxCommand(shell, {
       workspaceRoot: input.workspaceRoot,
-      readPaths: this.sandbox.sandboxReadPaths,
-      writePaths: this.sandbox.sandboxWritePaths,
+      readPaths: [
+        ...this.sandbox.sandboxReadPaths,
+        ...(input.sandboxReadPaths ?? []),
+      ],
+      writePaths: [
+        ...this.sandbox.sandboxWritePaths,
+        ...(input.sandboxWritePaths ?? []),
+      ],
       allowNetwork: this.sandbox.sandboxNetwork,
     });
   }
