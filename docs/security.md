@@ -111,7 +111,7 @@ execute transferred content.
 
 ## Project Memory
 
-Project memory is stored under `DEVSPACE_STATE_DIR` (default `~/.local/share/devspace`), not inside the repo by default. It is scoped to the canonical project root and shared by checkout and worktree modes for the same project.
+Project memory is stored inside the workspace at `.devspace/memory/` (for example, `<workspace>/.devspace/memory/`). It is scoped to the canonical project root and shared by checkout and worktree modes for the same project. DevSpace creates `.devspace/.gitignore` with `memory/` so memory files are ignored from version control by default; if you already have a `.devspace/.gitignore`, add `memory/` there to keep memory local.
 
 Use memory only for durable project facts, decisions, and checkpoints. Do not store secrets, credentials, owner passwords, or transient chain-of-thought in memory files. Memory file names are validated to prevent hidden files, path separators, and traversal.
 

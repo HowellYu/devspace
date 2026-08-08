@@ -9,6 +9,7 @@ export const MEMORY_FILE_NAMES = new Set([
 ]);
 
 const MEMORY_DIR_NAME = "memory";
+const DEVSPACE_DIR_NAME = ".devspace";
 const NAMESPACE_HASH_BYTES = 16;
 const MAX_MEMORY_FILENAME_LENGTH = 128;
 
@@ -32,41 +33,29 @@ class FileProjectMemoryManager implements ProjectMemoryManager {
   constructor(private readonly stateDir: string) {}
 
   async listFiles(root: string): Promise<MemoryFileInfo[]> {
-    const namespace = memoryNamespacePath(this.stateDir, root);
-    const files: MemoryFileInfo[] = [];
-
-    let entries;
-    try {
-      entries = await opendir(namespace);
-    } catch (error) {
-      if (isErrnoException(error) && error.code === "ENOENT") {
-        return [];
-      }
-      throw error;
+    const localNamespace = localMemoryNamespacePath(root);
+    if (await directoryExists(localNamespace)) {
+      return listMemoryFiles(localNamespace);
     }
 
-    for await (const entry of entries) {
-      if (!entry.isFile()) continue;
-      if (!isValidMemoryFilename(entry.name)) continue;
-
-      const path = join(namespace, entry.name);
-      const stats = await stat(path).catch(() => undefined);
-      files.push({
-        file: entry.name,
-        size: stats?.size ?? 0,
-        updatedAt: stats?.mtime.toISOString(),
-      });
-    }
-
-    return files.sort((a, b) => a.file.localeCompare(b.file));
+    return listMemoryFiles(memoryNamespacePath(this.stateDir, root));
   }
 
   async readFile(root: string, file: string): Promise<string | undefined> {
     assertValidMemoryFilename(file);
-    const path = join(memoryNamespacePath(this.stateDir, root), file);
 
+    const localPath = join(localMemoryNamespacePath(root), file);
     try {
-      return await readFile(path, "utf8");
+      return await readFile(localPath, "utf8");
+    } catch (error) {
+      if (!isErrnoException(error) || error.code !== "ENOENT") {
+        throw error;
+      }
+    }
+
+    const globalPath = join(memoryNamespacePath(this.stateDir, root), file);
+    try {
+      return await readFile(globalPath, "utf8");
     } catch (error) {
       if (isErrnoException(error) && error.code === "ENOENT") {
         return undefined;
@@ -77,11 +66,19 @@ class FileProjectMemoryManager implements ProjectMemoryManager {
 
   async writeFile(root: string, file: string, content: string): Promise<void> {
     assertValidMemoryFilename(file);
-    const namespace = memoryNamespacePath(this.stateDir, root);
-    await mkdir(namespace, { recursive: true, mode: 0o700 });
-    const path = join(namespace, file);
+
+    const localNamespace = localMemoryNamespacePath(root);
+    await mkdir(localNamespace, { recursive: true, mode: 0o700 });
+    await ensureDevspaceGitignore(root);
+    await maybeMigrateGlobalMemory(memoryNamespacePath(this.stateDir, root), localNamespace);
+
+    const path = join(localNamespace, file);
     await writeFile(path, content, { mode: 0o600 });
   }
+}
+
+export function localMemoryNamespacePath(root: string): string {
+  return join(root, DEVSPACE_DIR_NAME, MEMORY_DIR_NAME);
 }
 
 export function memoryNamespacePath(stateDir: string, root: string): string {
@@ -115,6 +112,93 @@ export function assertValidMemoryFilename(file: string): string {
     );
   }
   return file;
+}
+
+async function listMemoryFiles(namespace: string): Promise<MemoryFileInfo[]> {
+  const files: MemoryFileInfo[] = [];
+
+  let entries;
+  try {
+    entries = await opendir(namespace);
+  } catch (error) {
+    if (isErrnoException(error) && error.code === "ENOENT") {
+      return [];
+    }
+    throw error;
+  }
+
+  for await (const entry of entries) {
+    if (!entry.isFile()) continue;
+    if (!isValidMemoryFilename(entry.name)) continue;
+
+    const path = join(namespace, entry.name);
+    const stats = await stat(path).catch(() => undefined);
+    files.push({
+      file: entry.name,
+      size: stats?.size ?? 0,
+      updatedAt: stats?.mtime.toISOString(),
+    });
+  }
+
+  return files.sort((a, b) => a.file.localeCompare(b.file));
+}
+
+async function maybeMigrateGlobalMemory(globalNamespace: string, localNamespace: string): Promise<void> {
+  let entries;
+  try {
+    entries = await opendir(globalNamespace);
+  } catch (error) {
+    if (isErrnoException(error) && error.code === "ENOENT") {
+      return;
+    }
+    throw error;
+  }
+
+  for await (const entry of entries) {
+    if (!entry.isFile()) continue;
+    if (!isValidMemoryFilename(entry.name)) continue;
+
+    const source = join(globalNamespace, entry.name);
+    const dest = join(localNamespace, entry.name);
+
+    const [sourceStats, destStats] = await Promise.all([
+      stat(source).catch(() => undefined),
+      stat(dest).catch(() => undefined),
+    ]);
+    if (!sourceStats) continue;
+    if (destStats && destStats.mtime >= sourceStats.mtime) continue;
+
+    const data = await readFile(source);
+    await writeFile(dest, data, { mode: 0o600 });
+  }
+}
+
+async function ensureDevspaceGitignore(root: string): Promise<void> {
+  const devspaceDir = join(root, DEVSPACE_DIR_NAME);
+  const gitignorePath = join(devspaceDir, ".gitignore");
+
+  try {
+    await stat(gitignorePath);
+    return;
+  } catch (error) {
+    if (!isErrnoException(error) || error.code !== "ENOENT") {
+      throw error;
+    }
+  }
+
+  await writeFile(gitignorePath, "memory/\n", { mode: 0o644 });
+}
+
+async function directoryExists(path: string): Promise<boolean> {
+  try {
+    const stats = await stat(path);
+    return stats.isDirectory();
+  } catch (error) {
+    if (isErrnoException(error) && error.code === "ENOENT") {
+      return false;
+    }
+    throw error;
+  }
 }
 
 function isErrnoException(error: unknown): error is NodeJS.ErrnoException {

@@ -187,10 +187,12 @@ existing subagent sessions for that workspace.
 ## Project Memory
 
 DevSpace keeps a small durable project memory store scoped to each canonical
-project root. It lives under `DEVSPACE_STATE_DIR` (default
-`~/.local/share/devspace/memory/`), not inside the repo by default, so it
-survives server restarts and new ChatGPT sessions for the same project can
-read it.
+project root. It lives inside the workspace at `.devspace/memory/` (for
+example, `<workspace>/.devspace/memory/`), so it survives server restarts and
+new ChatGPT sessions for the same project can read it. DevSpace creates
+`.devspace/.gitignore` with `memory/` so memory files are not committed by
+default; if you already have a `.devspace/.gitignore`, add `memory/` to keep
+memory local.
 
 Use these tools to access memory:
 

@@ -1,12 +1,7 @@
 #!/usr/bin/env node
 import { createRequire } from "node:module";
 import { stdin as input, stdout as output } from "node:process";
-import { spawn } from "node:child_process";
-import { mkdtempSync, writeFileSync } from "node:fs";
-import { readFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { resolve } from "node:path";
 import * as prompts from "@clack/prompts";
 import { satisfies } from "semver";
 import { loadConfig } from "./config.js";
@@ -18,24 +13,19 @@ import {
   nodeVersionStatus,
   runDoctorDiagnostics,
 } from "./doctor.js";
-import { runLocalAgentProvider } from "./local-agent-adapters.js";
+import { parseLocalAgentRunArgs } from "./local-agent-targets.js";
 import {
-  isLocalAgentProvider,
-  loadLocalAgentProfiles,
-  type LocalAgentProfile,
-} from "./local-agent-profiles.js";
-import {
-  assertLocalAgentProviderAvailable,
   formatLocalAgentProviderAvailabilitySummary,
   refreshLocalAgentProviderAvailabilitySnapshot,
 } from "./local-agent-availability.js";
 import {
-  formatAvailableLocalAgentTargets,
-  parseLocalAgentRunArgs,
-  resolveLocalAgentTarget,
-} from "./local-agent-targets.js";
-import { createLocalAgentStore, type LocalAgentRecord } from "./local-agent-store.js";
-import type { LocalAgentRunResult } from "./local-agent-runtime.js";
+  createLocalAgentStore,
+  type LocalAgentRecord,
+} from "./local-agent-store.js";
+import {
+  createLocalAgentOrchestrator,
+  parseAgentsWaitTimeoutSeconds,
+} from "./local-agent-orchestrator.js";
 import {
   ensureDevspaceDefaultSkills,
   generateOwnerToken,
@@ -415,56 +405,27 @@ async function runAgentsList(): Promise<void> {
 
 async function runAgentsRun(args: string[]): Promise<void> {
   const parsed = parseLocalAgentRunArgs(args);
-
   const config = loadConfig();
   const workspaceRoot = resolveCurrentWorkspaceRoot();
   const store = createLocalAgentStore(config);
+  const orchestrator = createLocalAgentOrchestrator(config, store);
   const existing = store.get(parsed.target);
 
-  if (existing) {
-    if (!isLocalAgentProvider(existing.provider)) {
-      throw new Error(`Unknown subagent provider for existing session: ${existing.provider}`);
-    }
-    assertLocalAgentProviderAvailable(existing.provider);
-    const promptFile = writeAgentPromptFile(parsed.prompt);
-    store.update(existing.id, {
-      status: "starting",
-      model: parsed.model ?? existing.model,
-      thinking: parsed.thinking ?? existing.thinking,
-      latestResponse: undefined,
-      error: undefined,
-    });
-    spawnAgentWorker(existing.id, promptFile);
-    console.log(formatAgentLine({
-      ...existing,
-      status: "running",
-      model: parsed.model ?? existing.model,
-      thinking: parsed.thinking ?? existing.thinking,
-    }));
-    return;
-  }
-
-  const profiles = await loadLocalAgentProfiles(config, workspaceRoot);
-  const target = resolveLocalAgentTarget(parsed.target, profiles, parsed.model, parsed.thinking);
-  if (!target) {
-    throw new Error(
-      `Unknown subagent profile, provider, or id: ${parsed.target}. Available ${formatAvailableLocalAgentTargets(profiles)}`,
-    );
-  }
-  assertLocalAgentProviderAvailable(target.provider);
-
-  const promptFile = writeAgentPromptFile(parsed.prompt);
-  const record = store.create({
-    workspaceId: process.env.DEVSPACE_WORKSPACE_ID,
-    workspaceRoot,
-    profileName: target.name,
-    provider: target.provider,
-    model: target.model,
-    thinking: target.thinking,
-  });
-
-  spawnAgentWorker(record.id, promptFile);
-  console.log(formatAgentLine({ ...record, status: "running" }));
+  const record = existing
+    ? await orchestrator.continue(existing.id, {
+        prompt: parsed.prompt,
+        model: parsed.model,
+        thinking: parsed.thinking,
+      })
+    : (await orchestrator.start({
+        workspaceId: process.env.DEVSPACE_WORKSPACE_ID,
+        workspaceRoot,
+        target: parsed.target,
+        prompt: parsed.prompt,
+        model: parsed.model,
+        thinking: parsed.thinking,
+      })).record;
+  console.log(formatAgentLine(record));
 }
 
 async function runAgentsShow(args: string[]): Promise<void> {
@@ -473,14 +434,9 @@ async function runAgentsShow(args: string[]): Promise<void> {
 
   const config = loadConfig();
   const store = createLocalAgentStore(config);
-  let record = store.get(id);
+  const orchestrator = createLocalAgentOrchestrator(config, store);
+  const { record } = await orchestrator.inspect(id);
   if (!record) throw new Error(`Unknown subagent id: ${id}`);
-
-  const deadline = Date.now() + 15_000;
-  while ((record.status === "starting" || record.status === "running") && Date.now() < deadline) {
-    await sleep(500);
-    record = store.get(id) ?? record;
-  }
 
   console.log(formatAgentLine(record));
   if (record.latestResponse) {
@@ -494,36 +450,6 @@ async function runAgentsShow(args: string[]): Promise<void> {
   if (record.status === "starting" || record.status === "running") {
     console.log(`No final response yet. Call \`devspace agents show ${record.id}\` again later.`);
   }
-}
-
-const AGENTS_WAIT_TERMINAL_STATUSES: ReadonlySet<LocalAgentRecord["status"]> = new Set([
-  "idle",
-  "error",
-  "stopped",
-]);
-const AGENTS_WAIT_DEFAULT_TIMEOUT_SECONDS = 300;
-const AGENTS_WAIT_MAX_TIMEOUT_SECONDS = 3600;
-const AGENTS_WAIT_POLL_MS = 750;
-
-function parseAgentsWaitTimeoutSeconds(
-  raw: string | undefined,
-  env: NodeJS.ProcessEnv = process.env,
-): number {
-  const source = raw ?? env.DEVSPACE_AGENTS_WAIT_TIMEOUT;
-  if (source === undefined) return AGENTS_WAIT_DEFAULT_TIMEOUT_SECONDS;
-  const trimmed = source.trim();
-  if (!/^\d+$/.test(trimmed)) {
-    throw new Error(
-      `Invalid agents wait timeout: ${source}. Expected a positive integer number of seconds.`,
-    );
-  }
-  const seconds = Number.parseInt(trimmed, 10);
-  if (seconds < 1 || seconds > AGENTS_WAIT_MAX_TIMEOUT_SECONDS) {
-    throw new Error(
-      `Invalid agents wait timeout: ${source}. Expected between 1 and ${AGENTS_WAIT_MAX_TIMEOUT_SECONDS} seconds.`,
-    );
-  }
-  return seconds;
 }
 
 function parseAgentsWaitArgs(args: string[]): { id: string; timeoutRaw?: string } {
@@ -548,18 +474,14 @@ function parseAgentsWaitArgs(args: string[]): { id: string; timeoutRaw?: string 
 
 async function runAgentsWait(args: string[]): Promise<void> {
   const { id, timeoutRaw } = parseAgentsWaitArgs(args);
-  const timeoutSeconds = parseAgentsWaitTimeoutSeconds(timeoutRaw);
+  const timeoutSeconds = parseAgentsWaitTimeoutSeconds(
+    timeoutRaw ?? process.env.DEVSPACE_AGENTS_WAIT_TIMEOUT,
+  );
 
   const config = loadConfig();
   const store = createLocalAgentStore(config);
-  let record = store.get(id);
-  if (!record) throw new Error(`Unknown subagent id: ${id}`);
-
-  const deadline = Date.now() + timeoutSeconds * 1000;
-  while (!AGENTS_WAIT_TERMINAL_STATUSES.has(record.status) && Date.now() < deadline) {
-    await sleep(AGENTS_WAIT_POLL_MS);
-    record = store.get(id) ?? record;
-  }
+  const orchestrator = createLocalAgentOrchestrator(config, store);
+  const { record, timedOut } = await orchestrator.wait(id, timeoutSeconds);
 
   console.log(formatAgentLine(record));
   if (record.latestResponse) {
@@ -570,7 +492,7 @@ async function runAgentsWait(args: string[]): Promise<void> {
     console.log(record.error);
     return;
   }
-  if (!AGENTS_WAIT_TERMINAL_STATUSES.has(record.status)) {
+  if (timedOut) {
     console.log(
       `Still ${record.status} after ${timeoutSeconds}s. The worker was not stopped; ` +
         `call \`devspace agents wait ${record.id}\` again, or \`devspace agents show ${record.id}\` for a quick status check.`,
@@ -578,106 +500,16 @@ async function runAgentsWait(args: string[]): Promise<void> {
   }
 }
 
-async function runAgentsWorker(args: string[]): Promise<void> {  const [id, promptFileFlag, promptFile] = args;
+async function runAgentsWorker(args: string[]): Promise<void> {
+  const [id, promptFileFlag, promptFile] = args;
   if (!id || promptFileFlag !== "--prompt-file" || !promptFile) {
     throw new Error("Usage: devspace agents __worker <id> --prompt-file <path>");
   }
 
   const config = loadConfig();
   const store = createLocalAgentStore(config);
-  const record = store.get(id);
-  if (!record) throw new Error(`Unknown subagent id: ${id}`);
-
-  store.update(record.id, { status: "running", error: undefined });
-  try {
-    const profiles = await loadLocalAgentProfiles(config, record.workspaceRoot);
-    const profile = profiles.find((candidate) => candidate.name === record.profileName);
-    const prompt = await readFile(promptFile, "utf8");
-    const result = profile
-      ? await runLocalAgentProfile(profile, record, prompt)
-      : await runRawLocalAgentProvider(record, prompt);
-    store.update(record.id, {
-      providerSessionId: result.providerSessionId ?? undefined,
-      status: "idle",
-      latestResponse: result.finalResponse,
-      error: undefined,
-    });
-  } catch (error) {
-    store.update(record.id, {
-      status: "error",
-      error: error instanceof Error ? error.message : String(error),
-    });
-  }
-}
-
-async function runLocalAgentProfile(
-  profile: LocalAgentProfile,
-  record: LocalAgentRecord,
-  prompt: string,
-): Promise<LocalAgentRunResult> {
-  const body = profile.body.trim();
-  const fullPrompt = body ? `${body}\n\nTask:\n${prompt}` : prompt;
-  return runLocalAgentProvider(profile.provider, {
-    prompt: fullPrompt,
-    workspace: record.workspaceRoot,
-    providerSessionId: record.providerSessionId,
-    writeMode: "allowed",
-    model: record.model ?? profile.model,
-    thinking: record.thinking ?? profile.thinking,
-  });
-}
-
-async function runRawLocalAgentProvider(
-  record: LocalAgentRecord,
-  prompt: string,
-): Promise<LocalAgentRunResult> {
-  if (record.profileName !== record.provider || !isLocalAgentProvider(record.provider)) {
-    throw new Error(`Subagent profile not found: ${record.profileName}`);
-  }
-
-  return runLocalAgentProvider(record.provider, {
-    prompt,
-    workspace: record.workspaceRoot,
-    providerSessionId: record.providerSessionId,
-    writeMode: "allowed",
-    model: record.model,
-    thinking: record.thinking,
-  });
-}
-
-function spawnAgentWorker(agentId: string, promptFile: string): void {
-  const child = spawn(process.execPath, [
-    ...process.execArgv,
-    fileURLToPath(import.meta.url),
-    "agents",
-    "__worker",
-    agentId,
-    "--prompt-file",
-    promptFile,
-  ], {
-    detached: true,
-    stdio: "ignore",
-    env: process.env,
-  });
-  child.unref();
-}
-
-function writeAgentPromptFile(prompt: string): string {
-  const directory = mkdtempSync(join(tmpdir(), "devspace-agent-prompt-"));
-  const filePath = join(directory, "prompt.txt");
-  writeFileSync(filePath, prompt, { mode: 0o600 });
-  return filePath;
-}
-
-function resolveCurrentWorkspaceRoot(): string {
-  return resolve(process.env.DEVSPACE_WORKSPACE_ROOT || process.cwd());
-}
-
-function resolveCurrentWorkspaceScope(): { workspaceId?: string; workspaceRoot: string } {
-  return {
-    workspaceId: process.env.DEVSPACE_WORKSPACE_ID,
-    workspaceRoot: resolveCurrentWorkspaceRoot(),
-  };
+  const orchestrator = createLocalAgentOrchestrator(config, store);
+  await orchestrator.executeWorker(id, promptFile);
 }
 
 function formatAgentLine(agent: Pick<
@@ -689,8 +521,15 @@ function formatAgentLine(agent: Pick<
   return `${agent.id} ${agent.status} ${agent.profileName} ${agent.provider}${model}${thinking}`;
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolveSleep) => setTimeout(resolveSleep, ms));
+function resolveCurrentWorkspaceRoot(): string {
+  return resolve(process.env.DEVSPACE_WORKSPACE_ROOT || process.cwd());
+}
+
+function resolveCurrentWorkspaceScope(): { workspaceId?: string; workspaceRoot: string } {
+  return {
+    workspaceId: process.env.DEVSPACE_WORKSPACE_ID,
+    workspaceRoot: resolveCurrentWorkspaceRoot(),
+  };
 }
 
 function printAgentsHelp(): void {

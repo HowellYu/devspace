@@ -65,6 +65,14 @@ import {
   getLocalAgentProviderAvailabilitySnapshot,
   type LocalAgentProviderAvailability,
 } from "./local-agent-availability.js";
+import {
+  createLocalAgentStore,
+  type LocalAgentRecord,
+} from "./local-agent-store.js";
+import {
+  createLocalAgentOrchestrator,
+  type LocalAgentOrchestrator,
+} from "./local-agent-orchestrator.js";
 
 type Transport = StreamableHTTPServerTransport;
 // MCP clients can reconnect without closing the previous transport. Bound stale
@@ -180,6 +188,11 @@ const toolNames = {
   readProjectMemory: "read_project_memory",
   writeProjectMemory: "write_project_memory",
   listProjectMemory: "list_project_memory",
+  startWorker: "start_worker",
+  waitWorker: "wait_worker",
+  inspectWorker: "inspect_worker",
+  continueWorker: "continue_worker",
+  stopWorker: "stop_worker",
 } as const;
 
 interface ToolLogFields {
@@ -204,7 +217,7 @@ function serverInstructions(config: ServerConfig): string {
       : "";
 
   if (config.toolMode === "codex") {
-    return `Use DevSpace as a local coding workspace. Call ${toolNames.openWorkspace} once per project folder or worktree and reuse its workspaceId. Open it again when the workspaceId is invalid, the project changes, checkout/worktree mode changes, or another isolated worktree is needed. Use ${toolNames.read} for direct file reads, apply_patch for all file modifications, exec_command for inspection, tests, builds, and other commands, and write_stdin to poll or interact with running processes. Use ${toolNames.listProjectMemory}, ${toolNames.readProjectMemory}, and ${toolNames.writeProjectMemory} to access durable project memory across sessions; memory is stored outside the repo under DevSpace state and is only for durable project facts, decisions, and checkpoints. Follow instructions returned by ${toolNames.openWorkspace}; read applicable instruction and skill files before working in their scope.${artifactInstruction}${showChangesInstruction}`;
+    return `Use DevSpace as a local coding workspace. Call ${toolNames.openWorkspace} once per project folder or worktree and reuse its workspaceId. Open it again when the workspaceId is invalid, the project changes, checkout/worktree mode changes, or another isolated worktree is needed. Use ${toolNames.read} for direct file reads, apply_patch for all file modifications, exec_command for inspection, tests, builds, and other commands, and write_stdin to poll or interact with running processes. Use ${toolNames.listProjectMemory}, ${toolNames.readProjectMemory}, and ${toolNames.writeProjectMemory} to access durable project memory across sessions; memory is stored inside the workspace at .devspace/memory/ and is only for durable project facts, decisions, and checkpoints. Follow instructions returned by ${toolNames.openWorkspace}; read applicable instruction and skill files before working in their scope.${artifactInstruction}${showChangesInstruction}`;
   }
 
   const inspection = config.toolMode !== "full"
@@ -217,9 +230,13 @@ function serverInstructions(config: ServerConfig): string {
 
   const agentsMd = `Follow instructions returned by ${toolNames.openWorkspace}. Before working under a path listed in availableAgentsFiles, use ${toolNames.read} to inspect that instruction file and follow it. `;
 
-  const memory = `Project memory is durable across sessions for the same project root. Use ${toolNames.listProjectMemory} to see existing memory files, ${toolNames.readProjectMemory} to read one, and ${toolNames.writeProjectMemory} to create or overwrite one. Memory is stored outside the repo under DevSpace state and is only for durable project facts, decisions, and checkpoints; do not store secrets or transient chain-of-thought there.`;
+  const workers = config.subagents
+    ? `For subagent delegation, prefer the native MCP tools start_worker, wait_worker, inspect_worker, continue_worker, and stop_worker. Use the devspace agents CLI only as a fallback or for debugging. `
+    : "";
 
-  return `Use DevSpace as a local coding workspace. Call ${toolNames.openWorkspace} once per project folder or worktree to obtain a workspaceId. Reuse that same workspaceId for all later file, search, edit, write, show-changes, shell, and memory tools in that folder; do not call ${toolNames.openWorkspace} again unless switching to a different project folder, changing checkout/worktree mode, the workspaceId is rejected as unknown, or a new isolated worktree is requested. ${agentsMd}${skills}${memory} ${inspection}Prefer ${toolNames.edit} for targeted modifications, ${toolNames.write} only for new files or complete rewrites, and ${toolNames.shell} for tests, builds, git inspection, package scripts, and commands that are better executed by the shell. Do not create or modify files with ${toolNames.shell}; avoid shell redirection, heredocs, tee, sed -i, perl -i, node/python/ruby scripts, or any command whose purpose is to write project files.${artifactInstruction}${showChangesInstruction}`;
+  const memory = `Project memory is durable across sessions for the same project root. Use ${toolNames.listProjectMemory} to see existing memory files, ${toolNames.readProjectMemory} to read one, and ${toolNames.writeProjectMemory} to create or overwrite one. Memory is stored inside the workspace at .devspace/memory/ and is only for durable project facts, decisions, and checkpoints; do not store secrets or transient chain-of-thought there.`;
+
+  return `Use DevSpace as a local coding workspace. Call ${toolNames.openWorkspace} once per project folder or worktree to obtain a workspaceId. Reuse that same workspaceId for all later file, search, edit, write, show-changes, shell, memory, and worker tools in that folder; do not call ${toolNames.openWorkspace} again unless switching to a different project folder, changing checkout/worktree mode, the workspaceId is rejected as unknown, or a new isolated worktree is requested. ${agentsMd}${skills}${workers}${memory} ${inspection}Prefer ${toolNames.edit} for targeted modifications, ${toolNames.write} only for new files or complete rewrites, and ${toolNames.shell} for tests, builds, git inspection, package scripts, and commands that are better executed by the shell. Do not create or modify files with ${toolNames.shell}; avoid shell redirection, heredocs, tee, sed -i, perl -i, node/python/ruby scripts, or any command whose purpose is to write project files.${artifactInstruction}${showChangesInstruction}`;
 }
 
 function formatVisibleAgent(agent: {
@@ -272,6 +289,58 @@ const workspaceLocalAgentOutputSchema = z.object({
   thinking: z.string().optional(),
   providerAvailable: z.boolean().optional(),
   providerUnavailableReason: z.string().optional(),
+});
+
+const workerStatusSchema = z.enum(["starting", "running", "idle", "error", "stopped"]);
+
+const changedFileOutputSchema = z.object({
+  path: z.string(),
+  previousPath: z.string().optional(),
+  type: z.string(),
+  additions: z.number(),
+  removals: z.number(),
+});
+
+const checkpointSummaryOutputSchema = z.object({
+  files: z.number(),
+  additions: z.number(),
+  removals: z.number(),
+});
+
+const workerBaseOutputSchema = z.object({
+  result: z.string(),
+  workerId: z.string(),
+  status: workerStatusSchema,
+  provider: z.string(),
+  profile: z.string(),
+  model: z.string().optional(),
+  thinking: z.string().optional(),
+});
+
+const startWorkerOutputSchema = workerBaseOutputSchema.extend({
+  chosenProvider: z.string(),
+  chosenProfile: z.string(),
+  fallbackUsed: z.boolean(),
+});
+
+const waitWorkerOutputSchema = workerBaseOutputSchema.extend({
+  latestResponse: z.string().optional(),
+  error: z.string().optional(),
+  timedOut: z.boolean(),
+});
+
+const inspectWorkerOutputSchema = workerBaseOutputSchema.extend({
+  latestResponse: z.string().optional(),
+  error: z.string().optional(),
+  providerSessionId: z.string().optional(),
+  changedFiles: z.array(changedFileOutputSchema),
+  checkpointSummary: checkpointSummaryOutputSchema.optional(),
+});
+
+const stopWorkerOutputSchema = z.object({
+  result: z.string(),
+  workerId: z.string(),
+  status: workerStatusSchema,
 });
 
 const workspaceLocalAgentProviderOutputSchema = z.object({
@@ -711,8 +780,13 @@ export function createMcpServer(
   localAgentProviders: LocalAgentProviderAvailability[],
   incomingArtifactAdapters: readonly IncomingArtifactAdapter[],
   memoryManager?: ProjectMemoryManager,
+  localAgentOrchestrator?: LocalAgentOrchestrator,
 ): McpServer {
   const memory = memoryManager ?? createProjectMemoryManager(config.stateDir);
+  const localAgentOrchestratorInstance = localAgentOrchestrator ?? createLocalAgentOrchestrator(
+    config,
+    createLocalAgentStore(config),
+  );
   const server = new McpServer(
     {
       name: "devspace",
@@ -859,8 +933,8 @@ export function createMcpServer(
       const loadedAgentsFiles = includeBootstrapContext ? cardAgentsFiles : [];
       const availableAgentsFileOutputs = includeBootstrapContext ? cardAvailableAgentsFiles : [];
       const cardInstruction = config.skillsEnabled
-        ? "Use this workspaceId in all subsequent tool calls for this project. Do not call open_workspace again for this same folder unless this workspaceId stops working, you switch to a different project folder or checkout/worktree mode, or the user requests a new isolated worktree. Follow loaded agentsFiles instructions. Before working under a path listed in availableAgentsFiles, read that instruction file. When a task matches an available skill in skills, read its path before proceeding."
-        : "Use this workspaceId in all subsequent tool calls for this project. Do not call open_workspace again for this same folder unless this workspaceId stops working, you switch to a different project folder or checkout/worktree mode, or the user requests a new isolated worktree. Follow loaded agentsFiles instructions. Before working under a path listed in availableAgentsFiles, read that instruction file.";
+        ? "Use this workspaceId in all subsequent tool calls for this project. Do not call open_workspace again for this same folder unless this workspaceId stops working, you switch to a different project folder or checkout/worktree mode, or the user requests a new isolated worktree. Follow loaded agentsFiles instructions. Before working under a path listed in availableAgentsFiles, read that instruction file. When a task matches an available skill in skills, read its path before proceeding. For subagent delegation, prefer start_worker, wait_worker, inspect_worker, continue_worker, and stop_worker; use the devspace agents CLI only as a fallback or for debugging."
+        : "Use this workspaceId in all subsequent tool calls for this project. Do not call open_workspace again for this same folder unless this workspaceId stops working, you switch to a different project folder or checkout/worktree mode, or the user requests a new isolated worktree. Follow loaded agentsFiles instructions. Before working under a path listed in availableAgentsFiles, read that instruction file. For subagent delegation, prefer start_worker, wait_worker, inspect_worker, continue_worker, and stop_worker; use the devspace agents CLI only as a fallback or for debugging.";
       const instruction = workspaceReused
         ? [
             `Workspace already open as ${workspace.id}.`,
@@ -898,6 +972,9 @@ export function createMcpServer(
               : undefined,
             visibleAgents.length > 0
               ? `Available subagent profiles: ${visibleAgents.map(formatVisibleAgent).join(", ")}`
+              : undefined,
+            config.subagents
+              ? "Available worker tools: start_worker, wait_worker, inspect_worker, continue_worker, stop_worker."
               : undefined,
             memoryFiles.length > 0
               ? `Project memory: ${memoryFiles.map((file) => file.file).join(", ")}`
@@ -976,7 +1053,7 @@ export function createMcpServer(
     {
       title: "Read project memory",
       description:
-        "Read a durable project memory file for an open workspace. Memory is scoped to the canonical project root, stored outside the repo under DevSpace state, and persists across sessions. Use for decisions.md, progress.md, next-steps.md, or equivalent concise durable artifacts. Call open_workspace first and pass workspaceId.",
+        "Read a durable project memory file for an open workspace. Memory is scoped to the canonical project root, stored inside the workspace at .devspace/memory/, and persists across sessions. Use for decisions.md, progress.md, next-steps.md, or equivalent concise durable artifacts. Call open_workspace first and pass workspaceId.",
       inputSchema: {
         workspaceId: z.string().describe("Workspace identifier returned by open_workspace."),
         file: z.string().describe("Memory file name, such as decisions.md, progress.md, or next-steps.md."),
@@ -1035,7 +1112,7 @@ export function createMcpServer(
     {
       title: "Write project memory",
       description:
-        "Create or overwrite a durable project memory file for an open workspace. Use for concise durable artifacts such as decisions.md, progress.md, or next-steps.md. Memory is stored outside the repo under DevSpace state and is only for durable project facts, decisions, and checkpoints; do not store secrets, credentials, or transient chain-of-thought there.",
+        "Create or overwrite a durable project memory file for an open workspace. Use for concise durable artifacts such as decisions.md, progress.md, or next-steps.md. Memory is stored inside the workspace at .devspace/memory/ and is only for durable project facts, decisions, and checkpoints; do not store secrets, credentials, or transient chain-of-thought there.",
       inputSchema: {
         workspaceId: z.string().describe("Workspace identifier returned by open_workspace."),
         file: z.string().describe("Memory file name, such as decisions.md, progress.md, or next-steps.md."),
@@ -1084,7 +1161,7 @@ export function createMcpServer(
     {
       title: "List project memory",
       description:
-        "List durable project memory files for an open workspace. Memory is scoped to the canonical project root and persists across sessions. Call open_workspace first and pass workspaceId.",
+        "List durable project memory files for an open workspace. Memory is scoped to the canonical project root, stored inside the workspace at .devspace/memory/, and persists across sessions. Call open_workspace first and pass workspaceId.",
       inputSchema: {
         workspaceId: z.string().describe("Workspace identifier returned by open_workspace."),
       },
@@ -1829,7 +1906,269 @@ export function createMcpServer(
     });
   }
 
+  if (config.subagents) {
+    registerLocalAgentWorkerTools(server, config, workspaces, reviewCheckpoints, localAgentOrchestratorInstance);
+  }
+
   return server;
+}
+
+function registerLocalAgentWorkerTools(
+  server: McpServer,
+  config: ServerConfig,
+  workspaces: WorkspaceRegistry,
+  reviewCheckpoints: ReturnType<typeof createReviewCheckpointManager>,
+  orchestrator: LocalAgentOrchestrator,
+): void {
+  const WORKER_TOOL_ANNOTATIONS = {
+    startWorker: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+    waitWorker: { readOnlyHint: true },
+    inspectWorker: { readOnlyHint: true },
+    continueWorker: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+    stopWorker: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
+  };
+
+  registerAppTool(
+    server,
+    toolNames.startWorker,
+    {
+      title: "Start worker",
+      description:
+        "Start a subagent worker for an open workspace. The target can be a profile name returned by open_workspace or a built-in provider name. Returns immediately with a workerId; call wait_worker to collect the result. The worker inherits the local user's authority.",
+      inputSchema: {
+        workspaceId: z.string().describe("Workspace identifier returned by open_workspace."),
+        target: z.string().describe("Subagent profile name, built-in provider name, or existing worker id for a follow-up."),
+        prompt: z.string().min(1).describe("Self-contained prompt for the worker."),
+        model: z.string().optional().describe("Optional model override for the provider."),
+        thinking: z.string().optional().describe("Optional thinking/effort level override."),
+        fallback: z
+          .boolean()
+          .optional()
+          .describe(
+            "If true and the target's provider is unavailable, fall back to the first available built-in provider in deterministic order. Defaults to false.",
+          ),
+      },
+      outputSchema: startWorkerOutputSchema,
+      ...toolWidgetDescriptorMeta(config, "shell"),
+      annotations: WORKER_TOOL_ANNOTATIONS.startWorker,
+    },
+    async ({ workspaceId, target, prompt, model, thinking, fallback }) => {
+      const startedAt = performance.now();
+      const workspace = workspaces.getWorkspace(workspaceId);
+      const { record, fallbackUsed } = await orchestrator.start({
+        workspaceId,
+        workspaceRoot: workspace.root,
+        target,
+        prompt,
+        model,
+        thinking,
+        fallback,
+      });
+      const result = fallbackUsed
+        ? `Started worker ${record.id} for ${record.profileName}. The requested provider was unavailable; fell back to ${record.provider}.`
+        : `Started worker ${record.id} for ${record.profileName} using ${record.provider}.`;
+      logToolCall(config, {
+        tool: toolNames.startWorker,
+        workspaceId,
+        success: true,
+        durationMs: Math.round(performance.now() - startedAt),
+      });
+      return {
+        content: [textBlock(result)],
+        structuredContent: {
+          result,
+          workerId: record.id,
+          status: record.status,
+          provider: record.provider,
+          profile: record.profileName,
+          model: record.model,
+          thinking: record.thinking,
+          chosenProvider: record.provider,
+          chosenProfile: record.profileName,
+          fallbackUsed,
+        },
+      };
+    },
+  );
+
+  registerAppTool(
+    server,
+    toolNames.waitWorker,
+    {
+      title: "Wait for worker",
+      description:
+        "Wait until a worker reaches a terminal status (idle, error, or stopped) or the timeout expires. A timeout does not stop the worker; call wait_worker again to keep waiting.",
+      inputSchema: {
+        workspaceId: z.string().describe("Workspace identifier returned by open_workspace."),
+        workerId: z.string().describe("Worker identifier returned by start_worker."),
+        timeoutSeconds: z
+          .number()
+          .int()
+          .min(1)
+          .max(3600)
+          .optional()
+          .default(300)
+          .describe("Wait timeout in seconds. Defaults to 300, max 3600."),
+      },
+      outputSchema: waitWorkerOutputSchema,
+      ...toolWidgetDescriptorMeta(config, "shell"),
+      annotations: WORKER_TOOL_ANNOTATIONS.waitWorker,
+    },
+    async ({ workspaceId, workerId, timeoutSeconds }) => {
+      const startedAt = performance.now();
+      workspaces.getWorkspace(workspaceId);
+      const { record, timedOut } = await orchestrator.wait(workerId, timeoutSeconds);
+      const result = timedOut
+        ? `Worker ${workerId} is still ${record.status} after ${timeoutSeconds}s. The worker was not stopped.`
+        : `Worker ${workerId} finished with status ${record.status}.`;
+      logToolCall(config, {
+        tool: toolNames.waitWorker,
+        workspaceId,
+        success: !timedOut && record.status !== "error",
+        durationMs: Math.round(performance.now() - startedAt),
+      });
+      return {
+        content: [textBlock(result)],
+        structuredContent: {
+          result,
+          workerId: record.id,
+          status: record.status,
+          provider: record.provider,
+          profile: record.profileName,
+          latestResponse: record.latestResponse,
+          error: record.error,
+          timedOut,
+        },
+      };
+    },
+  );
+
+  registerAppTool(
+    server,
+    toolNames.inspectWorker,
+    {
+      title: "Inspect worker",
+      description:
+        "Return the current status, provider, profile, model, thinking, latest response, and provider session id for a worker. Also includes changed-file metadata when a review checkpoint is available.",
+      inputSchema: {
+        workspaceId: z.string().describe("Workspace identifier returned by open_workspace."),
+        workerId: z.string().describe("Worker identifier returned by start_worker."),
+      },
+      outputSchema: inspectWorkerOutputSchema,
+      ...toolWidgetDescriptorMeta(config, "shell"),
+      annotations: WORKER_TOOL_ANNOTATIONS.inspectWorker,
+    },
+    async ({ workspaceId, workerId }) => {
+      const startedAt = performance.now();
+      workspaces.getWorkspace(workspaceId);
+      const { record, checkpoint } = await orchestrator.inspect(workerId, { reviewCheckpoints });
+      const result = `Worker ${workerId} status: ${record.status}.`;
+      logToolCall(config, {
+        tool: toolNames.inspectWorker,
+        workspaceId,
+        success: true,
+        durationMs: Math.round(performance.now() - startedAt),
+      });
+      return {
+        content: [textBlock(result)],
+        structuredContent: {
+          result,
+          workerId: record.id,
+          status: record.status,
+          provider: record.provider,
+          profile: record.profileName,
+          model: record.model,
+          thinking: record.thinking,
+          latestResponse: record.latestResponse,
+          error: record.error,
+          providerSessionId: record.providerSessionId,
+          changedFiles: checkpoint?.files ?? [],
+          checkpointSummary: checkpoint?.summary,
+        },
+      };
+    },
+  );
+
+  registerAppTool(
+    server,
+    toolNames.continueWorker,
+    {
+      title: "Continue worker",
+      description:
+        "Send a follow-up prompt to an existing worker. The follow-up resumes the same provider conversation/session id, so context is preserved.",
+      inputSchema: {
+        workspaceId: z.string().describe("Workspace identifier returned by open_workspace."),
+        workerId: z.string().describe("Worker identifier returned by start_worker."),
+        prompt: z.string().min(1).describe("Follow-up prompt for the worker."),
+        model: z.string().optional().describe("Optional model override for the provider."),
+        thinking: z.string().optional().describe("Optional thinking/effort level override."),
+      },
+      outputSchema: workerBaseOutputSchema,
+      ...toolWidgetDescriptorMeta(config, "shell"),
+      annotations: WORKER_TOOL_ANNOTATIONS.continueWorker,
+    },
+    async ({ workspaceId, workerId, prompt, model, thinking }) => {
+      const startedAt = performance.now();
+      workspaces.getWorkspace(workspaceId);
+      const record = await orchestrator.continue(workerId, { prompt, model, thinking });
+      const result = `Continuing worker ${record.id} for ${record.profileName} using ${record.provider}.`;
+      logToolCall(config, {
+        tool: toolNames.continueWorker,
+        workspaceId,
+        success: true,
+        durationMs: Math.round(performance.now() - startedAt),
+      });
+      return {
+        content: [textBlock(result)],
+        structuredContent: {
+          result,
+          workerId: record.id,
+          status: record.status,
+          provider: record.provider,
+          profile: record.profileName,
+          model: record.model,
+          thinking: record.thinking,
+        },
+      };
+    },
+  );
+
+  registerAppTool(
+    server,
+    toolNames.stopWorker,
+    {
+      title: "Stop worker",
+      description:
+        "Best-effort stop a running or starting worker. Terminal workers are returned unchanged.",
+      inputSchema: {
+        workspaceId: z.string().describe("Workspace identifier returned by open_workspace."),
+        workerId: z.string().describe("Worker identifier returned by start_worker."),
+      },
+      outputSchema: stopWorkerOutputSchema,
+      ...toolWidgetDescriptorMeta(config, "shell"),
+      annotations: WORKER_TOOL_ANNOTATIONS.stopWorker,
+    },
+    async ({ workspaceId, workerId }) => {
+      const startedAt = performance.now();
+      workspaces.getWorkspace(workspaceId);
+      const record = await orchestrator.stop(workerId);
+      const result = `Worker ${workerId} status: ${record.status}.`;
+      logToolCall(config, {
+        tool: toolNames.stopWorker,
+        workspaceId,
+        success: true,
+        durationMs: Math.round(performance.now() - startedAt),
+      });
+      return {
+        content: [textBlock(result)],
+        structuredContent: {
+          result,
+          workerId: record.id,
+          status: record.status,
+        },
+      };
+    },
+  );
 }
 
 export interface CreateServerOptions {
@@ -1860,6 +2199,8 @@ export function createServer(
   });
   const workspaceStore = createWorkspaceStore(config.stateDir);
   const workspaces = new WorkspaceRegistry(config, workspaceStore);
+  const localAgentStore = createLocalAgentStore(config);
+  const localAgentOrchestrator = createLocalAgentOrchestrator(config, localAgentStore);
   const reviewCheckpoints = createReviewCheckpointManager();
   const processSessions = new ProcessSessionManager();
   const localAgentProviders = config.subagents
@@ -2026,6 +2367,8 @@ export function createServer(
           processSessions,
           localAgentProviders,
           incomingArtifactAdapters,
+          undefined,
+          localAgentOrchestrator,
         );
         await server.connect(transport);
       } else {
@@ -2058,6 +2401,7 @@ export function createServer(
         processSessions.shutdown();
         oauthProvider.close();
         workspaceStore.close?.();
+        localAgentStore.close();
       })();
       return closePromise;
     },

@@ -17,6 +17,7 @@ export interface LocalAgentRecord {
   status: LocalAgentStatus;
   latestResponse?: string;
   error?: string;
+  workerPid?: number;
   createdAt: string;
   updatedAt: string;
 }
@@ -28,6 +29,7 @@ export interface CreateLocalAgentRecordInput {
   provider: string;
   model?: string;
   thinking?: string;
+  workerPid?: number;
 }
 
 export interface LocalAgentListScope {
@@ -47,6 +49,7 @@ interface LocalAgentRow {
   status: string;
   latest_response: string | null;
   error: string | null;
+  worker_pid: number | null;
   created_at: string;
   updated_at: string;
 }
@@ -95,6 +98,7 @@ export class LocalAgentStore {
       provider: input.provider,
       model: input.model,
       thinking: input.thinking,
+      workerPid: input.workerPid,
       status: "starting",
       createdAt: now,
       updatedAt: now,
@@ -111,9 +115,10 @@ export class LocalAgentStore {
           model,
           thinking,
           status,
+          worker_pid,
           created_at,
           updated_at
-        ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         record.id,
@@ -124,6 +129,7 @@ export class LocalAgentStore {
         record.model ?? null,
         record.thinking ?? null,
         record.status,
+        record.workerPid ?? null,
         record.createdAt,
         record.updatedAt,
       );
@@ -175,6 +181,7 @@ export class LocalAgentStore {
           status = ?,
           latest_response = ?,
           error = ?,
+          worker_pid = ?,
           updated_at = ?
          where id = ?`,
       )
@@ -189,6 +196,7 @@ export class LocalAgentStore {
         updated.status,
         updated.latestResponse ?? null,
         updated.error ?? null,
+        updated.workerPid ?? null,
         updated.updatedAt,
         updated.id,
       );
@@ -225,6 +233,7 @@ function rowToLocalAgentRecord(row: LocalAgentRow): LocalAgentRecord {
     status: readStatus(row.status),
     latestResponse: row.latest_response ?? undefined,
     error: row.error ?? undefined,
+    workerPid: row.worker_pid ?? undefined,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };

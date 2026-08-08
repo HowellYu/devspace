@@ -27,6 +27,11 @@ const migrations: Migration[] = [
     name: "workspace-conversation-bindings",
     up: migrateWorkspaceConversationBindings,
   },
+  {
+    version: 5,
+    name: "local-agent-worker-pid",
+    up: migrateLocalAgentWorkerPid,
+  },
 ];
 
 export function migrateDatabase(sqlite: Database.Database): void {
@@ -162,6 +167,7 @@ function migrateLocalAgentSessions(sqlite: Database.Database): void {
       status text not null,
       latest_response text,
       error text,
+      worker_pid integer,
       created_at text not null,
       updated_at text not null
     );
@@ -177,6 +183,7 @@ function migrateLocalAgentSessions(sqlite: Database.Database): void {
   `);
 
   addColumnIfMissing(sqlite, "local_agent_sessions", "thinking", "text");
+  addColumnIfMissing(sqlite, "local_agent_sessions", "worker_pid", "integer");
 }
 
 function migrateWorkspaceConversationBindings(sqlite: Database.Database): void {
@@ -196,6 +203,10 @@ function migrateWorkspaceConversationBindings(sqlite: Database.Database): void {
     create index if not exists workspace_conversation_bindings_workspace_idx
       on workspace_conversation_bindings(workspace_session_id);
   `);
+}
+
+function migrateLocalAgentWorkerPid(sqlite: Database.Database): void {
+  addColumnIfMissing(sqlite, "local_agent_sessions", "worker_pid", "integer");
 }
 
 function addColumnIfMissing(

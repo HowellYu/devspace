@@ -10,7 +10,7 @@ import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { loadProjectContextFiles } from "@earendil-works/pi-coding-agent";
 import type { ServerConfig } from "./config.js";
 import { createManagedWorktree } from "./git-worktrees.js";
-import { memoryNamespaceId, memoryNamespacePath } from "./project-memory.js";
+import { localMemoryNamespacePath, memoryNamespaceId } from "./project-memory.js";
 import {
   AccessDeniedError,
   assertAllowedPath,
@@ -329,7 +329,7 @@ export class WorkspaceRegistry {
   }
 
   memoryNamespacePath(workspace: Workspace): string {
-    return memoryNamespacePath(this.config.stateDir, this.memoryRoot(workspace));
+    return localMemoryNamespacePath(this.memoryRoot(workspace));
   }
 
   memoryNamespaceId(workspace: Workspace): string {

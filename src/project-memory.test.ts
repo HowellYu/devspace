@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { type TestContext } from "node:test";
@@ -7,7 +7,9 @@ import {
   assertValidMemoryFilename,
   createProjectMemoryManager,
   isValidMemoryFilename,
+  localMemoryNamespacePath,
   memoryNamespaceId,
+  memoryNamespacePath,
   MEMORY_FILE_NAMES,
   type ProjectMemoryManager,
 } from "./project-memory.js";
@@ -49,41 +51,47 @@ test("memory namespace id is stable for the same root", () => {
   assert.notEqual(memoryNamespaceId(root), memoryNamespaceId("/Users/example/other"));
 });
 
-test("write, read, list, and overwrite memory files", async (t) => {
-  const { manager, cleanup } = await fixture(t);
+test("write, read, list, and overwrite memory files locally", async (t) => {
+  const { manager, root, cleanup } = await fixture(t);
 
   for (const file of WELL_KNOWN_FILES) {
-    await manager.writeFile("/project", file, `content for ${file}\n`);
+    await manager.writeFile(root, file, `content for ${file}\n`);
   }
 
-  const listed = await manager.listFiles("/project");
+  const localNamespace = localMemoryNamespacePath(root);
+  assert.equal(localNamespace.startsWith(root), true);
+
+  const listed = await manager.listFiles(root);
   assert.deepEqual(
     listed.map((entry) => entry.file),
     WELL_KNOWN_FILES,
   );
 
   for (const file of WELL_KNOWN_FILES) {
-    const content = await manager.readFile("/project", file);
+    const content = await manager.readFile(root, file);
     assert.equal(content, `content for ${file}\n`);
   }
 
-  await manager.writeFile("/project", "decisions.md", "updated decisions\n");
-  assert.equal(await manager.readFile("/project", "decisions.md"), "updated decisions\n");
+  await manager.writeFile(root, "decisions.md", "updated decisions\n");
+  assert.equal(await manager.readFile(root, "decisions.md"), "updated decisions\n");
 
   await cleanup();
 });
 
 test("different canonical roots are isolated", async (t) => {
-  const { manager, cleanup } = await fixture(t);
+  const { manager, root, cleanup } = await fixture(t);
 
-  await manager.writeFile("/project-a", "decisions.md", "project-a decision\n");
-  await manager.writeFile("/project-b", "decisions.md", "project-b decision\n");
+  const projectA = join(root, "project-a");
+  const projectB = join(root, "project-b");
 
-  assert.equal(await manager.readFile("/project-a", "decisions.md"), "project-a decision\n");
-  assert.equal(await manager.readFile("/project-b", "decisions.md"), "project-b decision\n");
+  await manager.writeFile(projectA, "decisions.md", "project-a decision\n");
+  await manager.writeFile(projectB, "decisions.md", "project-b decision\n");
 
-  const listedA = await manager.listFiles("/project-a");
-  const listedB = await manager.listFiles("/project-b");
+  assert.equal(await manager.readFile(projectA, "decisions.md"), "project-a decision\n");
+  assert.equal(await manager.readFile(projectB, "decisions.md"), "project-b decision\n");
+
+  const listedA = await manager.listFiles(projectA);
+  const listedB = await manager.listFiles(projectB);
   assert.equal(listedA.length, 1);
   assert.equal(listedB.length, 1);
   assert.equal(listedA[0]?.file, "decisions.md");
@@ -93,16 +101,16 @@ test("different canonical roots are isolated", async (t) => {
 });
 
 test("read returns undefined for missing memory files", async (t) => {
-  const { manager, cleanup } = await fixture(t);
+  const { manager, root, cleanup } = await fixture(t);
 
-  assert.equal(await manager.readFile("/project", "missing.md"), undefined);
+  assert.equal(await manager.readFile(root, "missing.md"), undefined);
 
   await cleanup();
 });
 
 test("listing ignores hidden and invalid files", async (t) => {
-  const { stateDir, manager, cleanup } = await fixture(t);
-  const namespace = join(stateDir, "memory", memoryNamespaceId("/project"));
+  const { root, manager, cleanup } = await fixture(t);
+  const namespace = localMemoryNamespacePath(root);
   const { mkdirSync, writeFileSync } = await import("node:fs");
   mkdirSync(namespace, { recursive: true });
   writeFileSync(join(namespace, ".hidden.md"), "hidden");
@@ -110,7 +118,7 @@ test("listing ignores hidden and invalid files", async (t) => {
   writeFileSync(join(namespace, "subdirectory", "nested.md"), "nested");
   writeFileSync(join(namespace, "valid.md"), "valid");
 
-  const listed = await manager.listFiles("/project");
+  const listed = await manager.listFiles(root);
   assert.deepEqual(
     listed.map((entry) => entry.file),
     ["valid.md"],
@@ -119,25 +127,101 @@ test("listing ignores hidden and invalid files", async (t) => {
   await cleanup();
 });
 
+test("falls back to global namespace when local memory does not exist", async (t) => {
+  const { manager, root, stateDir, cleanup } = await fixture(t);
+  const globalNamespace = memoryNamespacePath(stateDir, root);
+
+  const { mkdirSync, writeFileSync } = await import("node:fs");
+  mkdirSync(globalNamespace, { recursive: true });
+  writeFileSync(join(globalNamespace, "decisions.md"), "global decision\n");
+
+  assert.equal(await manager.readFile(root, "decisions.md"), "global decision\n");
+
+  const listed = await manager.listFiles(root);
+  assert.deepEqual(
+    listed.map((entry) => entry.file),
+    ["decisions.md"],
+  );
+
+  await cleanup();
+});
+
+test("writing migrates existing global memory into local namespace", async (t) => {
+  const { manager, root, stateDir, cleanup } = await fixture(t);
+  const globalNamespace = memoryNamespacePath(stateDir, root);
+  const localNamespace = localMemoryNamespacePath(root);
+
+  const { mkdirSync, writeFileSync } = await import("node:fs");
+  mkdirSync(globalNamespace, { recursive: true });
+  writeFileSync(join(globalNamespace, "decisions.md"), "global decision\n");
+  writeFileSync(join(globalNamespace, "progress.md"), "global progress\n");
+
+  await manager.writeFile(root, "next-steps.md", "local next step\n");
+
+  assert.equal(await manager.readFile(root, "decisions.md"), "global decision\n");
+  assert.equal(await manager.readFile(root, "progress.md"), "global progress\n");
+  assert.equal(await manager.readFile(root, "next-steps.md"), "local next step\n");
+
+  const listed = await manager.listFiles(root);
+  assert.deepEqual(
+    listed.map((entry) => entry.file),
+    ["decisions.md", "next-steps.md", "progress.md"],
+  );
+
+  const localStats = await stat(join(localNamespace, "decisions.md"));
+  assert.ok(localStats.isFile());
+
+  await cleanup();
+});
+
+test("creates .devspace/.gitignore on first write if absent", async (t) => {
+  const { manager, root, cleanup } = await fixture(t);
+
+  await manager.writeFile(root, "decisions.md", "decision\n");
+
+  const gitignore = await readFile(join(root, ".devspace", ".gitignore"), "utf8");
+  assert.equal(gitignore, "memory/\n");
+
+  await cleanup();
+});
+
+test("does not overwrite an existing .devspace/.gitignore", async (t) => {
+  const { manager, root, cleanup } = await fixture(t);
+
+  const { mkdirSync, writeFileSync } = await import("node:fs");
+  mkdirSync(join(root, ".devspace"), { recursive: true });
+  writeFileSync(join(root, ".devspace", ".gitignore"), "custom/\n");
+
+  await manager.writeFile(root, "decisions.md", "decision\n");
+
+  const gitignore = await readFile(join(root, ".devspace", ".gitignore"), "utf8");
+  assert.equal(gitignore, "custom/\n");
+
+  await cleanup();
+});
+
 interface MemoryFixture {
+  root: string;
   stateDir: string;
   manager: ProjectMemoryManager;
   cleanup(): Promise<void>;
 }
 
 async function fixture(t: TestContext): Promise<MemoryFixture> {
-  const stateDir = await mkdtemp(join(tmpdir(), "devspace-memory-test-"));
+  const root = await mkdtemp(join(tmpdir(), "devspace-memory-test-"));
+  const stateDir = join(root, "state");
   const manager = createProjectMemoryManager(stateDir);
 
   t.after(async () => {
-    await rm(stateDir, { recursive: true, force: true });
+    await rm(root, { recursive: true, force: true });
   });
 
   return {
+    root,
     stateDir,
     manager,
     cleanup: async () => {
-      await rm(stateDir, { recursive: true, force: true });
+      await rm(root, { recursive: true, force: true });
     },
   };
 }

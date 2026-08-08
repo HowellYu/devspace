@@ -12,9 +12,30 @@ a subagent-like workflow.
 Do not use subagents silently. Tell the user when another subagent is
 being used.
 
+## Native MCP worker tools
+
+Prefer the native MCP worker tools when the host supports them. Use the
+`devspace agents` CLI only as a fallback or for debugging.
+
+- `start_worker({ workspaceId, target, prompt, fallback? })` — start a worker
+  and get a `workerId`. Target is a profile name from `open_workspace`, a
+  built-in provider name, or an existing worker id to resume. Set `fallback` to
+  `true` to allow DevSpace to pick the first available provider if the target's
+  provider is unavailable.
+- `wait_worker({ workspaceId, workerId, timeoutSeconds? })` — block until the
+  worker finishes, errors, or stops. A timeout never stops the worker; call
+  `wait_worker` again. The default timeout is 300 seconds.
+- `inspect_worker({ workspaceId, workerId })` — quick status, latest response,
+  provider session id, and cheap changed-file metadata if a review checkpoint is
+  available.
+- `continue_worker({ workspaceId, workerId, prompt })` — send a follow-up that
+  resumes the same provider conversation/session id.
+- `stop_worker({ workspaceId, workerId })` — best-effort stop a running or
+  starting worker.
+
 ## Core commands
 
-Use only these commands for normal delegation:
+Use the CLI commands below only when the native MCP tools are not available:
 
 ```bash
 devspace agents ls
@@ -42,8 +63,8 @@ default timeout is 300 seconds (override with `--timeout <seconds>` or
 `wait` again to keep waiting.
 
 `show <id>` prints status and the latest response for quick checks and manual
-debugging. If the agent is still running, `show` waits briefly; prefer `wait`
-when you actually want the result.
+debugging. If the agent is still running, `show` returns the current status;
+prefer `wait` when you actually want the result.
 
 Do not run provider CLIs such as `codex`, `claude`, `opencode`, `pi`,
 `cursor-agent`, or `copilot` directly unless you are explicitly debugging
@@ -148,7 +169,10 @@ Well-known file names:
 - `progress.md` — what has been completed.
 - `next-steps.md` — remaining work or checkpoints.
 
-Memory is stored outside the repo under DevSpace state. It persists across
+Memory is stored inside the workspace at `.devspace/memory/` (for example,
+`<workspace>/.devspace/memory/`). DevSpace creates `.devspace/.gitignore` with
+`memory/` so memory files are not committed by default; if you already have a
+`.devspace/.gitignore`, add `memory/` to keep memory local. It persists across
 sessions for the same canonical project root. Use it only for durable project
 facts, decisions, and checkpoints; do not store secrets or transient
 chain-of-thought there. File names must end with `.md` and contain no path
