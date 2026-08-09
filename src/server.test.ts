@@ -272,11 +272,17 @@ test("open_workspace exposes project memory namespace and existing memory files"
   assert.equal(typeof structured.memoryNamespace, "string");
   assert.ok(Array.isArray(structured.memoryFiles));
   assert.deepEqual((structured.memoryFiles as string[]).sort(), ["decisions.md", "progress.md"]);
+  assert.equal(typeof structured.memoryRevision, "string");
+  assert.deepEqual(structured.memoryBootstrap, { "progress.md": "# Progress\n\nSetup done.\n" });
+  assert.equal(structured.memoryBootstrapTruncated, false);
   assert.match(responseText(opened), /Project memory: decisions\.md, progress\.md/);
+  assert.match(responseText(opened), /Automatic memory bootstrap:/);
+  assert.doesNotMatch(responseText(opened), /Use SQLite/);
 
   const card = responseCard(opened);
   assert.equal(typeof card.memoryNamespace, "string");
   assert.ok(Array.isArray(card.memoryFiles));
+  assert.equal(card.memoryRevision, structured.memoryRevision);
 });
 
 test("project memory persists across server restarts for the same workspace", async (t) => {

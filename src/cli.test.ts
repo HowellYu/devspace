@@ -238,6 +238,50 @@ if (process.platform !== "win32") {
   }
 }
 
+// devspace memory (workspace-scoped cross-agent memory protocol)
+
+{
+  const memoryRoot = mkdtempSync(join(tmpdir(), "devspace-cli-memory-test-"));
+  const projectRoot = join(memoryRoot, "project");
+  const stateDir = join(memoryRoot, ".state");
+  const configDir = join(memoryRoot, ".config");
+  mkdirSync(projectRoot, { recursive: true });
+  mkdirSync(stateDir, { recursive: true });
+  mkdirSync(configDir, { recursive: true });
+
+  const memoryEnv = {
+    ...process.env,
+    DEVSPACE_CONFIG_DIR: configDir,
+    DEVSPACE_ALLOWED_ROOTS: projectRoot,
+    DEVSPACE_STATE_DIR: stateDir,
+    DEVSPACE_OAUTH_OWNER_TOKEN: "test-owner-token-that-is-long-enough",
+  };
+  const runMemoryCli = (args: string[]): string =>
+    execFileSync("node", ["--import", "tsx", "src/cli.ts", ...args], {
+      cwd: process.cwd(),
+      encoding: "utf8",
+      env: memoryEnv,
+    });
+
+  try {
+    const written = JSON.parse(runMemoryCli([
+      "memory", "put", "progress.md", "--workspace", projectRoot, "--content", "current state\n",
+    ]));
+    assert.equal(written.version, 1);
+    assert.equal(typeof written.revision, "string");
+
+    const bootstrap = JSON.parse(runMemoryCli(["memory", "bootstrap", "--workspace", projectRoot]));
+    assert.equal(bootstrap.sections["progress.md"], "current state\n");
+    assert.equal(bootstrap.manifest.revision, written.revision);
+
+    assert.equal(runMemoryCli(["memory", "read", "progress.md", "--workspace", projectRoot]), "current state\n");
+    const manifest = JSON.parse(runMemoryCli(["memory", "manifest", "--workspace", projectRoot]));
+    assert.equal(manifest.revision, written.revision);
+  } finally {
+    rmSync(memoryRoot, { recursive: true, force: true });
+  }
+}
+
 // devspace agents wait
 
 const waitRoot = mkdtempSync(join(tmpdir(), "devspace-cli-wait-test-"));

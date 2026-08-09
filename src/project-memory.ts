@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdir, opendir, readFile, stat, writeFile } from "node:fs/promises";
+import { mkdir, opendir, readFile, rename, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 export const MEMORY_FILE_NAMES = new Set([
@@ -12,6 +12,11 @@ const MEMORY_DIR_NAME = "memory";
 const DEVSPACE_DIR_NAME = ".devspace";
 const NAMESPACE_HASH_BYTES = 16;
 const MAX_MEMORY_FILENAME_LENGTH = 128;
+const MEMORY_INDEX_FILE = "index.json";
+const MEMORY_BOOTSTRAP_FILES = ["progress.md", "next-steps.md", "context.md", "handoff.md"] as const;
+const MEMORY_BOOTSTRAP_MAX_CHARS = 6_000;
+const MEMORY_BOOTSTRAP_FILE_MAX_CHARS = 2_500;
+const MEMORY_FILE_MAX_BYTES = 32 * 1024;
 
 export interface MemoryFileInfo {
   file: string;
@@ -19,10 +24,31 @@ export interface MemoryFileInfo {
   updatedAt?: string;
 }
 
+export interface ProjectMemoryManifestFile {
+  revision: string;
+  size: number;
+  updatedAt?: string;
+}
+
+export interface ProjectMemoryManifest {
+  version: 1;
+  revision: string;
+  updatedAt?: string;
+  files: Record<string, ProjectMemoryManifestFile>;
+}
+
+export interface ProjectMemoryBootstrap {
+  manifest: ProjectMemoryManifest;
+  sections: Record<string, string>;
+  truncated: boolean;
+}
+
 export interface ProjectMemoryManager {
   listFiles(root: string): Promise<MemoryFileInfo[]>;
   readFile(root: string, file: string): Promise<string | undefined>;
   writeFile(root: string, file: string, content: string): Promise<void>;
+  manifest(root: string): Promise<ProjectMemoryManifest>;
+  bootstrap(root: string): Promise<ProjectMemoryBootstrap>;
 }
 
 export function createProjectMemoryManager(stateDir: string): ProjectMemoryManager {
@@ -66,6 +92,10 @@ class FileProjectMemoryManager implements ProjectMemoryManager {
 
   async writeFile(root: string, file: string, content: string): Promise<void> {
     assertValidMemoryFilename(file);
+    const bytes = Buffer.byteLength(content, "utf8");
+    if (bytes > MEMORY_FILE_MAX_BYTES) {
+      throw new Error(`Project memory file ${file} is ${bytes} bytes; maximum is ${MEMORY_FILE_MAX_BYTES}. Compact the durable state instead of storing transcripts or logs.`);
+    }
 
     const localNamespace = localMemoryNamespacePath(root);
     await mkdir(localNamespace, { recursive: true, mode: 0o700 });
@@ -74,6 +104,36 @@ class FileProjectMemoryManager implements ProjectMemoryManager {
 
     const path = join(localNamespace, file);
     await writeFile(path, content, { mode: 0o600 });
+    await writeManifestIndex(localNamespace, await buildManifest(localNamespace));
+  }
+
+  async manifest(root: string): Promise<ProjectMemoryManifest> {
+    const namespace = await effectiveMemoryNamespace(this.stateDir, root);
+    return buildManifest(namespace);
+  }
+
+  async bootstrap(root: string): Promise<ProjectMemoryBootstrap> {
+    const namespace = await effectiveMemoryNamespace(this.stateDir, root);
+    const manifest = await buildManifest(namespace);
+    const sections: Record<string, string> = {};
+    let remaining = MEMORY_BOOTSTRAP_MAX_CHARS;
+    let truncated = false;
+
+    for (const file of MEMORY_BOOTSTRAP_FILES) {
+      if (remaining <= 0) {
+        truncated = true;
+        break;
+      }
+      if (!manifest.files[file]) continue;
+      const content = await readFile(join(namespace, file), "utf8").catch(() => undefined);
+      if (content === undefined) continue;
+      const limit = Math.min(remaining, MEMORY_BOOTSTRAP_FILE_MAX_CHARS);
+      if (content.length > limit) truncated = true;
+      sections[file] = content.slice(0, limit);
+      remaining -= sections[file]!.length;
+    }
+
+    return { manifest, sections, truncated };
   }
 }
 
@@ -112,6 +172,54 @@ export function assertValidMemoryFilename(file: string): string {
     );
   }
   return file;
+}
+
+async function effectiveMemoryNamespace(stateDir: string, root: string): Promise<string> {
+  const localNamespace = localMemoryNamespacePath(root);
+  return (await directoryExists(localNamespace)) ? localNamespace : memoryNamespacePath(stateDir, root);
+}
+
+async function buildManifest(namespace: string): Promise<ProjectMemoryManifest> {
+  const files = await listMemoryFiles(namespace);
+  const entries: Array<[string, ProjectMemoryManifestFile]> = [];
+  let latestUpdatedAt: string | undefined;
+
+  for (const file of files) {
+    const content = await readFile(join(namespace, file.file)).catch(() => undefined);
+    if (!content) continue;
+    const revision = createHash("sha256").update(content).digest("hex").slice(0, 16);
+    entries.push([
+      file.file,
+      {
+        revision,
+        size: file.size,
+        updatedAt: file.updatedAt,
+      },
+    ]);
+    if (file.updatedAt && (!latestUpdatedAt || file.updatedAt > latestUpdatedAt)) {
+      latestUpdatedAt = file.updatedAt;
+    }
+  }
+
+  const filesByName = Object.fromEntries(entries.sort(([a], [b]) => a.localeCompare(b)));
+  const revision = createHash("sha256")
+    .update(JSON.stringify(Object.entries(filesByName).map(([file, info]) => [file, info.revision])))
+    .digest("hex")
+    .slice(0, 16);
+
+  return {
+    version: 1,
+    revision,
+    updatedAt: latestUpdatedAt,
+    files: filesByName,
+  };
+}
+
+async function writeManifestIndex(namespace: string, manifest: ProjectMemoryManifest): Promise<void> {
+  const tempPath = join(namespace, `${MEMORY_INDEX_FILE}.tmp`);
+  const indexPath = join(namespace, MEMORY_INDEX_FILE);
+  await writeFile(tempPath, `${JSON.stringify(manifest, null, 2)}\n`, { mode: 0o600 });
+  await rename(tempPath, indexPath);
 }
 
 async function listMemoryFiles(namespace: string): Promise<MemoryFileInfo[]> {

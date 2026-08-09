@@ -78,6 +78,73 @@ test("write, read, list, and overwrite memory files locally", async (t) => {
   await cleanup();
 });
 
+test("manifest revisions change only when memory content changes", async (t) => {
+  const { manager, root, cleanup } = await fixture(t);
+
+  const empty = await manager.manifest(root);
+  assert.equal(empty.version, 1);
+  assert.deepEqual(empty.files, {});
+
+  await manager.writeFile(root, "progress.md", "phase one\n");
+  const first = await manager.manifest(root);
+  assert.equal(first.files["progress.md"]?.size, "phase one\n".length);
+  assert.match(first.files["progress.md"]?.revision ?? "", /^[a-f0-9]{16}$/);
+
+  const same = await manager.manifest(root);
+  assert.equal(same.revision, first.revision);
+
+  await manager.writeFile(root, "progress.md", "phase two\n");
+  const second = await manager.manifest(root);
+  assert.notEqual(second.revision, first.revision);
+  assert.notEqual(second.files["progress.md"]?.revision, first.files["progress.md"]?.revision);
+
+  const index = JSON.parse(await readFile(join(localMemoryNamespacePath(root), "index.json"), "utf8"));
+  assert.equal(index.revision, second.revision);
+
+  await cleanup();
+});
+
+test("bootstrap returns only compact high-value sections", async (t) => {
+  const { manager, root, cleanup } = await fixture(t);
+
+  await manager.writeFile(root, "progress.md", "current progress\n");
+  await manager.writeFile(root, "next-steps.md", "next action\n");
+  await manager.writeFile(root, "context.md", "stable context\n");
+  await manager.writeFile(root, "decisions.md", "large decision history should stay lazy\n");
+
+  const bootstrap = await manager.bootstrap(root);
+  assert.equal(bootstrap.sections["progress.md"], "current progress\n");
+  assert.equal(bootstrap.sections["next-steps.md"], "next action\n");
+  assert.equal(bootstrap.sections["context.md"], "stable context\n");
+  assert.equal(bootstrap.sections["decisions.md"], undefined);
+  assert.equal(bootstrap.manifest.files["decisions.md"] !== undefined, true);
+  assert.equal(bootstrap.truncated, false);
+
+  await cleanup();
+});
+
+test("bootstrap caps large memory sections to protect token budgets", async (t) => {
+  const { manager, root, cleanup } = await fixture(t);
+  await manager.writeFile(root, "progress.md", "x".repeat(10_000));
+
+  const bootstrap = await manager.bootstrap(root);
+  assert.equal(bootstrap.sections["progress.md"]?.length, 2_500);
+  assert.equal(bootstrap.truncated, true);
+
+  await cleanup();
+});
+
+test("memory writes reject transcript-sized payloads", async (t) => {
+  const { manager, root, cleanup } = await fixture(t);
+
+  await assert.rejects(
+    () => manager.writeFile(root, "progress.md", "x".repeat(33 * 1024)),
+    /maximum is 32768/,
+  );
+
+  await cleanup();
+});
+
 test("different canonical roots are isolated", async (t) => {
   const { manager, root, cleanup } = await fixture(t);
 

@@ -233,7 +233,7 @@ function serverInstructions(config: ServerConfig): string {
     ? `For subagent delegation, prefer the native MCP tools start_worker, wait_worker, inspect_worker, continue_worker, and stop_worker. Use the devspace agents CLI only as a fallback or for debugging. `
     : "";
 
-  const memory = `Project memory is durable across sessions for the same project root. Use ${toolNames.listProjectMemory} to see existing memory files, ${toolNames.readProjectMemory} to read one, and ${toolNames.writeProjectMemory} to create or overwrite one. Memory is stored inside the workspace at .devspace/memory/ and is only for durable project facts, decisions, and checkpoints; do not store secrets or transient chain-of-thought there.`;
+  const memory = `Project memory is durable across sessions for the same canonical project root and is shared with other workspace-aware agents. open_workspace automatically returns a bounded memoryBootstrap plus a content-derived memoryRevision. Treat that bootstrap as the current handoff. Use ${toolNames.listProjectMemory} and ${toolNames.readProjectMemory} only when more detail is needed. Keep memory synchronized automatically at meaningful milestones with ${toolNames.writeProjectMemory}: update progress.md and next-steps.md when implementation state changes, context.md only for stable facts, and decisions.md only for durable decisions. Do not write memory for trivial reads, do not store secrets or chain-of-thought, and overwrite stale compact state rather than appending transcripts.`;
 
   return `Use DevSpace as a local coding workspace. Call ${toolNames.openWorkspace} once per project folder or worktree to obtain a workspaceId. Reuse that same workspaceId for all later file, search, edit, write, show-changes, shell, memory, and worker tools in that folder; do not call ${toolNames.openWorkspace} again unless switching to a different project folder, changing checkout/worktree mode, the workspaceId is rejected as unknown, or a new isolated worktree is requested. ${agentsMd}${skills}${workers}${memory} ${inspection}Prefer ${toolNames.edit} for targeted modifications, ${toolNames.write} only for new files or complete rewrites, and ${toolNames.shell} for tests, builds, git inspection, package scripts, and commands that are better executed by the shell. Do not create or modify files with ${toolNames.shell}; avoid shell redirection, heredocs, tee, sed -i, perl -i, node/python/ruby scripts, or any command whose purpose is to write project files.${artifactInstruction}${showChangesInstruction}`;
 }
@@ -447,6 +447,13 @@ function textSummary(content: ToolContent[]): {
     lines: text.length === 0 ? 0 : text.split("\n").length,
     characters: text.length,
   };
+}
+
+function formatMemoryBootstrap(sections: Record<string, string>, truncated: boolean): string {
+  const body = Object.entries(sections)
+    .map(([file, content]) => `--- ${file} ---\n${content}`)
+    .join("\n\n");
+  return truncated ? `${body}\n\n[bootstrap truncated; read individual memory files only when needed]` : body;
 }
 
 function contentLineCount(content: string): number {
@@ -884,6 +891,9 @@ export function createMcpServer(
         skillDiagnostics: z.array(z.unknown()).optional(),
         memoryNamespace: z.string().describe("Opaque stable identifier for this project's memory namespace."),
         memoryFiles: z.array(z.string()).describe("Names of durable memory files already stored for this project."),
+        memoryRevision: z.string().describe("Content-derived revision for the complete workspace memory state."),
+        memoryBootstrap: z.record(z.string(), z.string()).describe("Compact high-value memory sections loaded automatically for this workspace."),
+        memoryBootstrapTruncated: z.boolean(),
         instruction: z.string(),
       },
       ...toolWidgetDescriptorMeta(config, "workspace"),
@@ -929,16 +939,19 @@ export function createMcpServer(
       const cardAvailableAgentsFiles = availableAgentsFiles.map((file) => ({
         path: formatAgentsPath(file.path, workspace.root),
       }));
-      const memoryFiles = await memory.listFiles(workspaces.memoryRoot(workspace));
+      const memoryRoot = workspaces.memoryRoot(workspace);
+      const memoryFiles = await memory.listFiles(memoryRoot);
+      const memoryBootstrap = await memory.bootstrap(memoryRoot);
       const memoryNamespace = workspaces.memoryNamespaceId(workspace);
       const visibleSkills = includeBootstrapContext ? cardSkills : [];
       const visibleAgentProviders = includeBootstrapContext ? cardAgentProviders : [];
       const visibleAgents = includeBootstrapContext ? cardAgents : [];
       const loadedAgentsFiles = includeBootstrapContext ? cardAgentsFiles : [];
       const availableAgentsFileOutputs = includeBootstrapContext ? cardAvailableAgentsFiles : [];
+      const memoryInstruction = "Treat memoryBootstrap as the current compact cross-agent workspace handoff. Keep project memory synchronized automatically at meaningful milestones: update progress.md and next-steps.md when implementation state changes, context.md only for stable project facts, and decisions.md only for durable decisions. Do not write memory for trivial reads or transient discussion; keep files compact and overwrite stale state instead of appending transcripts.";
       const cardInstruction = config.skillsEnabled
-        ? "Use this workspaceId in all subsequent tool calls for this project. Do not call open_workspace again for this same folder unless this workspaceId stops working, you switch to a different project folder or checkout/worktree mode, or the user requests a new isolated worktree. Follow loaded agentsFiles instructions. Before working under a path listed in availableAgentsFiles, read that instruction file. When a task matches an available skill in skills, read its path before proceeding. For subagent delegation, prefer start_worker, wait_worker, inspect_worker, continue_worker, and stop_worker; use the devspace agents CLI only as a fallback or for debugging."
-        : "Use this workspaceId in all subsequent tool calls for this project. Do not call open_workspace again for this same folder unless this workspaceId stops working, you switch to a different project folder or checkout/worktree mode, or the user requests a new isolated worktree. Follow loaded agentsFiles instructions. Before working under a path listed in availableAgentsFiles, read that instruction file. For subagent delegation, prefer start_worker, wait_worker, inspect_worker, continue_worker, and stop_worker; use the devspace agents CLI only as a fallback or for debugging.";
+        ? `Use this workspaceId in all subsequent tool calls for this project. Do not call open_workspace again for this same folder unless this workspaceId stops working, you switch to a different project folder or checkout/worktree mode, or the user requests a new isolated worktree. Follow loaded agentsFiles instructions. Before working under a path listed in availableAgentsFiles, read that instruction file. When a task matches an available skill in skills, read its path before proceeding. For subagent delegation, prefer start_worker, wait_worker, inspect_worker, continue_worker, and stop_worker; use the devspace agents CLI only as a fallback or for debugging. ${memoryInstruction}`
+        : `Use this workspaceId in all subsequent tool calls for this project. Do not call open_workspace again for this same folder unless this workspaceId stops working, you switch to a different project folder or checkout/worktree mode, or the user requests a new isolated worktree. Follow loaded agentsFiles instructions. Before working under a path listed in availableAgentsFiles, read that instruction file. For subagent delegation, prefer start_worker, wait_worker, inspect_worker, continue_worker, and stop_worker; use the devspace agents CLI only as a fallback or for debugging. ${memoryInstruction}`;
       const instruction = workspaceReused
         ? [
             `Workspace already open as ${workspace.id}.`,
@@ -983,6 +996,10 @@ export function createMcpServer(
             memoryFiles.length > 0
               ? `Project memory: ${memoryFiles.map((file) => file.file).join(", ")}`
               : undefined,
+            `Memory revision: ${memoryBootstrap.manifest.revision}`,
+            Object.keys(memoryBootstrap.sections).length > 0
+              ? `Automatic memory bootstrap:\n${formatMemoryBootstrap(memoryBootstrap.sections, memoryBootstrap.truncated)}`
+              : undefined,
             instruction,
           ].filter(Boolean).join("\n"),
         },
@@ -1015,6 +1032,9 @@ export function createMcpServer(
             agents: cardAgents,
             memoryNamespace,
             memoryFiles,
+            memoryRevision: memoryBootstrap.manifest.revision,
+            memoryBootstrap: memoryBootstrap.sections,
+            memoryBootstrapTruncated: memoryBootstrap.truncated,
             instruction: cardInstruction,
             summary: {
               mode: workspace.mode,
@@ -1024,6 +1044,7 @@ export function createMcpServer(
               agentProviders: cardAgentProviders.length,
               agents: cardAgents.length,
               memoryFiles: memoryFiles.length,
+              memoryRevision: memoryBootstrap.manifest.revision,
             },
           },
         },
@@ -1045,6 +1066,9 @@ export function createMcpServer(
             : {}),
           memoryNamespace,
           memoryFiles: memoryFiles.map((file) => file.file),
+          memoryRevision: memoryBootstrap.manifest.revision,
+          memoryBootstrap: memoryBootstrap.sections,
+          memoryBootstrapTruncated: memoryBootstrap.truncated,
           instruction,
         },
       };

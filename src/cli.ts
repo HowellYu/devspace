@@ -56,8 +56,9 @@ import {
   uninstallLaunchdService,
 } from "./service.js";
 import { shutdownHttpServer } from "./server-shutdown.js";
+import { createProjectMemoryManager } from "./project-memory.js";
 
-type Command = "serve" | "init" | "doctor" | "config" | "access" | "grants" | "provider-access" | "agents" | "service" | "help" | "version";
+type Command = "serve" | "init" | "doctor" | "config" | "access" | "grants" | "provider-access" | "memory" | "agents" | "service" | "help" | "version";
 const require = createRequire(import.meta.url);
 const SUPPORTED_NODE_RANGE = ">=20.12 <27";
 
@@ -90,6 +91,9 @@ async function main(argv: string[]): Promise<void> {
     case "provider-access":
       runProviderAccessCommand(args);
       return;
+    case "memory":
+      await runMemoryCommand(args);
+      return;
     case "agents":
       await runAgentsCommand(args);
       return;
@@ -107,7 +111,7 @@ async function main(argv: string[]): Promise<void> {
 
 function normalizeCommand(command: string | undefined): Command {
   if (!command || command === "serve" || command === "start") return "serve";
-  if (command === "init" || command === "doctor" || command === "config" || command === "access" || command === "grants" || command === "provider-access" || command === "agents" || command === "service") return command;
+  if (command === "init" || command === "doctor" || command === "config" || command === "access" || command === "grants" || command === "provider-access" || command === "memory" || command === "agents" || command === "service") return command;
   if (command === "help" || command === "--help" || command === "-h") return "help";
   if (command === "version" || command === "--version" || command === "-v") return "version";
   throw new Error(`Unknown command: ${command}`);
@@ -645,6 +649,79 @@ function runProviderAccessCommand(args: string[]): void {
   console.log(`Granted ${record.id}: ${record.provider} ${record.access} ${record.kind} ${record.path}`);
 }
 
+async function runMemoryCommand(args: string[]): Promise<void> {
+  const [subcommand, ...rest] = args;
+  if (!subcommand || subcommand === "help" || subcommand === "--help" || subcommand === "-h") {
+    console.log([
+      "DevSpace workspace memory",
+      "",
+      "Usage:",
+      "  devspace memory bootstrap --workspace <project-root>",
+      "  devspace memory manifest --workspace <project-root>",
+      "  devspace memory read <file> --workspace <project-root>",
+      "  devspace memory put <file> --workspace <project-root> --content <text>",
+      "",
+      "Memory is scoped to an authorized workspace root. bootstrap returns compact high-value sections and a content-derived revision as JSON.",
+    ].join("\n"));
+    return;
+  }
+
+  let file: string | undefined;
+  let options = rest;
+  if (subcommand === "read" || subcommand === "put") {
+    [file, ...options] = rest;
+    if (!file) throw new Error(`Usage: devspace memory ${subcommand} <file> --workspace <project-root>${subcommand === "put" ? " --content <text>" : ""}`);
+  }
+
+  let workspaceRoot: string | undefined;
+  let content: string | undefined;
+  for (let index = 0; index < options.length; index += 1) {
+    const flag = options[index];
+    if (flag === "--workspace") {
+      workspaceRoot = options[index + 1];
+      if (!workspaceRoot) throw new Error("Missing value for --workspace.");
+      index += 1;
+      continue;
+    }
+    if (flag === "--content" && subcommand === "put") {
+      content = options[index + 1];
+      if (content === undefined) throw new Error("Missing value for --content.");
+      index += 1;
+      continue;
+    }
+    throw new Error(`Unknown memory argument: ${flag}`);
+  }
+
+  if (!workspaceRoot) throw new Error("--workspace is required for workspace memory.");
+  const config = loadConfig();
+  const canonicalRoot = canonicalPathIfPresent(workspaceRoot, true);
+  const authorized = config.allowedRoots.some((root) => isPathInsideRoot(canonicalRoot, canonicalPathIfPresent(root)));
+  if (!authorized) throw new Error(`Workspace is not inside an authorized project root: ${canonicalRoot}`);
+
+  const manager = createProjectMemoryManager(config.stateDir);
+  if (subcommand === "bootstrap") {
+    console.log(JSON.stringify(await manager.bootstrap(canonicalRoot)));
+    return;
+  }
+  if (subcommand === "manifest") {
+    console.log(JSON.stringify(await manager.manifest(canonicalRoot)));
+    return;
+  }
+  if (subcommand === "read") {
+    const value = await manager.readFile(canonicalRoot, file!);
+    if (value === undefined) throw new Error(`Memory file not found: ${file}`);
+    process.stdout.write(value);
+    return;
+  }
+  if (subcommand === "put") {
+    if (content === undefined) throw new Error("--content is required for memory put.");
+    await manager.writeFile(canonicalRoot, file!, content);
+    console.log(JSON.stringify(await manager.manifest(canonicalRoot)));
+    return;
+  }
+  throw new Error(`Unknown memory command: ${subcommand}`);
+}
+
 function printHelp(): void {
   console.log(
     [
@@ -660,6 +737,7 @@ function printHelp(): void {
       "  devspace access ...      Manage persisted authorized project roots locally",
       "  devspace grants ...      Manage local-only scoped extra-path grants",
       "  devspace provider-access ...  Manage provider-specific config access locally",
+      "  devspace memory ...      Read/write compact workspace memory through a stable local protocol",
       "  devspace agents ls       List subagent sessions",
       "  devspace agents run <profile-or-provider-or-id> [--model <model>] [--thinking <level>] [--max-runtime <seconds>] <prompt>",
       "  devspace agents show <id>",

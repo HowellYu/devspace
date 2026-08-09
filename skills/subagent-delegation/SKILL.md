@@ -184,8 +184,14 @@ Rules:
 
 ## Project memory
 
-Workers can read and write durable project memory through DevSpace. Use these
-tools so the same memory is available to the host brain and other workers:
+Workers can read and write durable project memory through DevSpace. The same
+workspace memory is the cross-agent handoff surface for the host brain, workers,
+and external workspace-aware operators such as Clawd. `open_workspace`
+automatically returns a bounded `memoryBootstrap` and content-derived
+`memoryRevision`; treat that compact bootstrap as current state before loading
+larger memory files.
+
+Use these tools for deeper reads or durable updates:
 
 - `list_project_memory({ workspaceId })`
 - `read_project_memory({ workspaceId, file })`
@@ -196,6 +202,8 @@ Well-known file names:
 - `decisions.md` — key decisions and rationale.
 - `progress.md` — what has been completed.
 - `next-steps.md` — remaining work or checkpoints.
+- `context.md` — stable architecture/project facts that rarely change.
+- `handoff.md` — optional compact human-semantic handoff when structured state is insufficient.
 
 Memory is stored inside the workspace at `.devspace/memory/` (for example,
 `<workspace>/.devspace/memory/`). DevSpace creates `.devspace/.gitignore` with
@@ -203,8 +211,13 @@ Memory is stored inside the workspace at `.devspace/memory/` (for example,
 `.devspace/.gitignore`, add `memory/` to keep memory local. It persists across
 sessions for the same canonical project root. Use it only for durable project
 facts, decisions, and checkpoints; do not store secrets or transient
-chain-of-thought there. File names must end with `.md` and contain no path
-separators or hidden names.
+chain-of-thought there. Automatically update `progress.md` and `next-steps.md`
+after meaningful implementation milestones, update `context.md` only for stable
+facts, and update `decisions.md` only when a durable decision changes. Do not
+write memory for trivial reads. Keep files compact and overwrite stale state
+instead of appending transcripts. Each file is capped at 32 KiB; automatic
+bootstrap content is capped much lower for token efficiency. File names must end
+with `.md` and contain no path separators or hidden names.
 
 ## After the worker responds
 

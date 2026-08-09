@@ -213,15 +213,27 @@ Well-known memory file names:
 - `progress.md` — current progress and completed milestones.
 - `next-steps.md` — pending work and next checkpoints.
 
-`open_workspace` returns the existing `memoryFiles` for the project so new
-sessions can discover prior memory without extra calls. Memory namespaces are
-stable for the same canonical root, so checkout and worktree modes for the same
-project share the same memory.
+`open_workspace` automatically returns the existing `memoryFiles`, a
+content-derived `memoryRevision`, and a bounded `memoryBootstrap`. The bootstrap
+loads only high-value compact state (`progress.md`, `next-steps.md`,
+`context.md`, and optional `handoff.md`) and leaves longer history such as
+`decisions.md` lazy. This lets a new ChatGPT session or another workspace-aware
+operator continue without an explicit handoff ritual or repeated full-memory
+reads.
+
+Memory namespaces are stable for the same canonical root, so checkout and
+worktree modes for the same project share the same memory. Local operators can
+use `devspace memory bootstrap|manifest|read|put --workspace <project-root>` to
+consume the same protocol without duplicating the revision/hash logic.
 
 Memory is only for durable project facts, decisions, and checkpoints. Do not
-store secrets, credentials, owner passwords, or transient chain-of-thought
-there. File names are validated: they must end with `.md`, contain no path
-separators, and must not be hidden.
+store secrets, credentials, owner passwords, transcripts, logs, or transient
+chain-of-thought there. Each memory file is capped at 32 KiB, while automatic
+bootstrap content is capped much lower for token efficiency. Update
+`progress.md` and `next-steps.md` automatically after meaningful project-state
+changes, `context.md` only for stable facts, and `decisions.md` only for durable
+decisions; do not write memory for trivial reads. File names are validated: they
+must end with `.md`, contain no path separators, and must not be hidden.
 
 ## Tool Names
 

@@ -111,7 +111,7 @@ execute transferred content.
 
 ## Project Memory
 
-Project memory is stored inside the workspace at `.devspace/memory/` (for example, `<workspace>/.devspace/memory/`). It is scoped to the canonical project root and shared by checkout and worktree modes for the same project. DevSpace creates `.devspace/.gitignore` with `memory/` so memory files are ignored from version control by default; if you already have a `.devspace/.gitignore`, add `memory/` there to keep memory local.
+Project memory is stored inside the workspace at `.devspace/memory/` (for example, `<workspace>/.devspace/memory/`). It is scoped to the canonical project root and shared by checkout and worktree modes for the same project. DevSpace exposes a content-derived memory revision plus a bounded automatic bootstrap so separate ChatGPT sessions and other workspace-aware local agents can synchronize compact project state without sharing transcripts. Memory files are capped at 32 KiB, and bootstrap content is capped more aggressively for token efficiency. DevSpace creates `.devspace/.gitignore` with `memory/` so memory files are ignored from version control by default; if you already have a `.devspace/.gitignore`, add `memory/` there to keep memory local.
 
 Use memory only for durable project facts, decisions, and checkpoints. Do not store secrets, credentials, owner passwords, or transient chain-of-thought in memory files. Memory file names are validated to prevent hidden files, path separators, and traversal.
 
