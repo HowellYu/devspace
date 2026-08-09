@@ -107,6 +107,7 @@ export const localAgentSessions = sqliteTable(
     error: text("error"),
     workerPid: integer("worker_pid"),
     executionTimeoutSeconds: integer("execution_timeout_seconds"),
+    fallbackEnabled: integer("fallback_enabled", { mode: "boolean" }).notNull().default(false),
     createdAt: text("created_at").notNull(),
     updatedAt: text("updated_at").notNull(),
   },

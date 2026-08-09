@@ -20,6 +20,7 @@ export interface LocalAgentRecord {
   error?: string;
   workerPid?: number;
   executionTimeoutSeconds?: number;
+  fallbackEnabled: boolean;
   createdAt: string;
   updatedAt: string;
 }
@@ -34,6 +35,7 @@ export interface CreateLocalAgentRecordInput {
   thinking?: string;
   workerPid?: number;
   executionTimeoutSeconds?: number;
+  fallbackEnabled?: boolean;
 }
 
 export interface LocalAgentListScope {
@@ -56,6 +58,7 @@ interface LocalAgentRow {
   error: string | null;
   worker_pid: number | null;
   execution_timeout_seconds: number | null;
+  fallback_enabled: number;
   created_at: string;
   updated_at: string;
 }
@@ -107,6 +110,7 @@ export class LocalAgentStore {
       thinking: input.thinking,
       workerPid: input.workerPid,
       executionTimeoutSeconds: input.executionTimeoutSeconds,
+      fallbackEnabled: input.fallbackEnabled ?? false,
       status: "starting",
       createdAt: now,
       updatedAt: now,
@@ -126,9 +130,10 @@ export class LocalAgentStore {
           status,
           worker_pid,
           execution_timeout_seconds,
+          fallback_enabled,
           created_at,
           updated_at
-        ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         record.id,
@@ -142,6 +147,7 @@ export class LocalAgentStore {
         record.status,
         record.workerPid ?? null,
         record.executionTimeoutSeconds ?? null,
+        record.fallbackEnabled ? 1 : 0,
         record.createdAt,
         record.updatedAt,
       );
@@ -196,6 +202,7 @@ export class LocalAgentStore {
           error = ?,
           worker_pid = ?,
           execution_timeout_seconds = ?,
+          fallback_enabled = ?,
           updated_at = ?
          where id = ?`,
       )
@@ -213,6 +220,7 @@ export class LocalAgentStore {
         updated.error ?? null,
         updated.workerPid ?? null,
         updated.executionTimeoutSeconds ?? null,
+        updated.fallbackEnabled ? 1 : 0,
         updated.updatedAt,
         updated.id,
       );
@@ -252,6 +260,7 @@ function rowToLocalAgentRecord(row: LocalAgentRow): LocalAgentRecord {
     error: row.error ?? undefined,
     workerPid: row.worker_pid ?? undefined,
     executionTimeoutSeconds: row.execution_timeout_seconds ?? undefined,
+    fallbackEnabled: row.fallback_enabled === 1,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };

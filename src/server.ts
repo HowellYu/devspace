@@ -1964,7 +1964,7 @@ function registerLocalAgentWorkerTools(
           .boolean()
           .optional()
           .describe(
-            "If true and the target's provider is unavailable, fall back to the first available built-in provider in deterministic order. Defaults to false.",
+            "If true (the default), fall back when the requested provider is unavailable and, on a first turn only, when it returns a recoverable quota/rate-limit/capacity error. Existing provider sessions are never silently moved to another provider.",
           ),
         executionTimeoutSeconds: z
           .number()

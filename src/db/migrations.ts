@@ -42,6 +42,11 @@ const migrations: Migration[] = [
     name: "local-agent-grant-scope-root",
     up: migrateLocalAgentGrantScopeRoot,
   },
+  {
+    version: 8,
+    name: "local-agent-fallback-enabled",
+    up: migrateLocalAgentFallbackEnabled,
+  },
 ];
 
 export function migrateDatabase(sqlite: Database.Database): void {
@@ -180,6 +185,7 @@ function migrateLocalAgentSessions(sqlite: Database.Database): void {
       error text,
       worker_pid integer,
       execution_timeout_seconds integer,
+      fallback_enabled integer not null default 0,
       created_at text not null,
       updated_at text not null
     );
@@ -198,6 +204,7 @@ function migrateLocalAgentSessions(sqlite: Database.Database): void {
   addColumnIfMissing(sqlite, "local_agent_sessions", "worker_pid", "integer");
   addColumnIfMissing(sqlite, "local_agent_sessions", "execution_timeout_seconds", "integer");
   addColumnIfMissing(sqlite, "local_agent_sessions", "grant_scope_root", "text");
+  addColumnIfMissing(sqlite, "local_agent_sessions", "fallback_enabled", "integer not null default 0");
 }
 
 function migrateWorkspaceConversationBindings(sqlite: Database.Database): void {
@@ -229,6 +236,10 @@ function migrateLocalAgentExecutionTimeout(sqlite: Database.Database): void {
 
 function migrateLocalAgentGrantScopeRoot(sqlite: Database.Database): void {
   addColumnIfMissing(sqlite, "local_agent_sessions", "grant_scope_root", "text");
+}
+
+function migrateLocalAgentFallbackEnabled(sqlite: Database.Database): void {
+  addColumnIfMissing(sqlite, "local_agent_sessions", "fallback_enabled", "integer not null default 0");
 }
 
 function addColumnIfMissing(

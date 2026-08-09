@@ -28,6 +28,12 @@ assert.equal(loadConfig(baseEnv).devspaceAgentsDir, join(emptyConfigDir, "agents
 assert.equal(loadConfig(baseEnv).subagents, false);
 assert.equal(loadConfig(baseEnv).artifactsEnabled, false);
 assert.equal(loadConfig(baseEnv).artifactMaxFileBytes, 100 * 1024 * 1024);
+assert.equal(loadConfig(baseEnv).agentsMaxConcurrent, 3);
+assert.equal(loadConfig({ ...baseEnv, DEVSPACE_AGENTS_MAX_CONCURRENT: "5" }).agentsMaxConcurrent, 5);
+assert.throws(
+  () => loadConfig({ ...baseEnv, DEVSPACE_AGENTS_MAX_CONCURRENT: "0" }),
+  /Invalid DEVSPACE_AGENTS_MAX_CONCURRENT/,
+);
 assert.equal(loadConfig(baseEnv).macosSandbox, process.platform === "darwin");
 assert.equal(loadConfig({ ...baseEnv, DEVSPACE_MACOS_SANDBOX: "off" }).macosSandbox, false);
 assert.equal(loadConfig({ ...baseEnv, DEVSPACE_MACOS_SANDBOX: "workspace" }).macosSandbox, true);

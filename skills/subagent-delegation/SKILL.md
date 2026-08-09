@@ -19,9 +19,9 @@ Prefer the native MCP worker tools when the host supports them. Use the
 
 - `start_worker({ workspaceId, target, prompt, fallback?, executionTimeoutSeconds? })` — start a worker
   and get a `workerId`. Target is a profile name from `open_workspace`, a
-  built-in provider name, or an existing worker id to resume. Set `fallback` to
-  `true` to allow DevSpace to pick the first available provider if the target's
-  provider is unavailable. Worker runtime defaults to 600 seconds. Keep that
+  built-in provider name, or an existing worker id to resume. Fallback defaults
+  to enabled: DevSpace may select another available provider when the requested
+  provider is unavailable and, on a first turn only, for recoverable quota/rate-limit/capacity failures. Existing provider sessions are never silently moved across providers. Worker runtime defaults to 600 seconds. Keep that
   default for normal work; raise it only when the task is known to require
   longer-running builds, tests, or other shell execution.
 - `wait_worker({ workspaceId, workerId, timeoutSeconds? })` — block until the
@@ -54,7 +54,10 @@ it automatically from the shell environment injected by the workspace tool.
 
 `run <profile> "<prompt>"` starts a new configured profile and prints a
 DevSpace agent id. Runtime defaults to 600 seconds (`DEVSPACE_AGENTS_EXECUTION_TIMEOUT`); use
-`--max-runtime <seconds>` only when the task is known to need longer.
+`--max-runtime <seconds>` only when the task is known to need longer. DevSpace
+allows at most three active workers by default (`DEVSPACE_AGENTS_MAX_CONCURRENT`)
+and refuses to start a duplicate continuation while the same worker is already
+`starting` or `running`.
 
 `run <provider> "<prompt>"` starts a raw built-in provider when no configured
 profile is needed. Built-in providers are listed by `open_workspace`.

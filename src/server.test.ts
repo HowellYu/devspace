@@ -46,6 +46,7 @@ class FakeOrchestrator implements LocalAgentOrchestrator {
       model: input.model,
       thinking: input.thinking,
       executionTimeoutSeconds: input.executionTimeoutSeconds ?? 600,
+      fallbackEnabled: input.fallback ?? true,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     };

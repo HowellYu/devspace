@@ -30,6 +30,7 @@ export interface ServerConfig {
   devspaceAgentsDir: string;
   subagents: boolean;
   agentDir: string;
+  agentsMaxConcurrent: number;
   macosSandbox: boolean;
   sandboxNetwork: boolean;
   sandboxReadPaths: string[];
@@ -268,6 +269,12 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
         ? files.config.subagents === true
         : parseBoolean(env.DEVSPACE_SUBAGENTS),
     agentDir: resolve(expandHomePath(env.DEVSPACE_AGENT_DIR ?? files.config.agentDir ?? defaultAgentDir())),
+    agentsMaxConcurrent: parsePositiveInteger(
+      env.DEVSPACE_AGENTS_MAX_CONCURRENT,
+      3,
+      "DEVSPACE_AGENTS_MAX_CONCURRENT",
+      32,
+    ),
     macosSandbox: parseMacosSandbox(env.DEVSPACE_MACOS_SANDBOX),
     sandboxNetwork: env.DEVSPACE_SANDBOX_NETWORK === undefined ? true : parseBoolean(env.DEVSPACE_SANDBOX_NETWORK),
     sandboxReadPaths: parseResolvedPathList(env.DEVSPACE_SANDBOX_READ_PATHS),

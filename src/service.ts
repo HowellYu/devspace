@@ -113,7 +113,15 @@ export function buildServiceEnvironment(options: ServiceInstallOptions): Record<
 
   // Preserve only explicitly-configured operational env that is safe to embed.
   // Never copy owner tokens, secrets, or general process env.
-  for (const key of ["LUNA_COMMAND", "CURSOR_COMMAND", "COPILOT_COMMAND", "PI_COMMAND"]) {
+  for (const key of [
+    "LUNA_COMMAND",
+    "CURSOR_COMMAND",
+    "COPILOT_COMMAND",
+    "PI_COMMAND",
+    "DEVSPACE_AGENTS_MAX_CONCURRENT",
+    "DEVSPACE_AGENTS_WAIT_TIMEOUT",
+    "DEVSPACE_AGENTS_EXECUTION_TIMEOUT",
+  ]) {
     const value = options.env?.[key] ?? process.env[key];
     if (value) env[key] = value;
   }

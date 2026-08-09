@@ -7,12 +7,17 @@ import test, { type TestContext } from "node:test";
 import { loadConfig } from "./config.js";
 import { LocalAgentStore } from "./local-agent-store.js";
 import type { LocalAgentProvider } from "./local-agent-profiles.js";
+import type { LocalAgentProviderAvailability } from "./local-agent-availability.js";
 import type { LocalAgentRunInput, LocalAgentRunResult } from "./local-agent-runtime.js";
 import {
   createLocalAgentOrchestrator,
   parseAgentsExecutionTimeoutSeconds,
   type LocalAgentOrchestrator,
 } from "./local-agent-orchestrator.js";
+
+const ALL_AVAILABLE: LocalAgentProviderAvailability[] = [
+  "codex", "claude", "opencode", "pi", "cursor", "copilot", "luna",
+].map((name) => ({ name: name as LocalAgentProvider, available: true }));
 
 interface RunCapture {
   provider: LocalAgentProvider;
@@ -68,6 +73,8 @@ async function fixture(t: TestContext) {
     spawnWorker: async (recordId: string, promptFile: string) => {
       setTimeout(() => orchestrator.executeWorker(recordId, promptFile), 0);
     },
+    refreshAvailability: () => ALL_AVAILABLE,
+    checkProviderAvailability: (provider) => ({ name: provider, available: true }),
   });
 
   t.after(async () => {
@@ -124,48 +131,179 @@ test("continue resumes the same provider session id", async (t) => {
   assert.equal(captures[1].provider, "codex");
 });
 
-test("start with an unavailable provider and no fallback fails", async (t) => {
-  const { project, orchestrator } = await fixture(t);
-  const previous = process.env.PI_COMMAND;
-  process.env.PI_COMMAND = "/definitely/missing/devspace-pi";
-  try {
-    await assert.rejects(
-      async () =>
-        await orchestrator.start({
-          workspaceRoot: project,
-          target: "pi",
-          prompt: "do work",
-        }),
-      /pi provider is not available/,
-    );
-  } finally {
-    if (previous === undefined) delete process.env.PI_COMMAND;
-    else process.env.PI_COMMAND = previous;
-  }
-});
+test("start with an unavailable provider and fallback disabled fails", async (t) => {
+  const { project, config, store } = await fixture(t);
+  const availability = ALL_AVAILABLE.map((entry) =>
+    entry.name === "pi" ? { name: entry.name, available: false, reason: "missing" } : entry,
+  );
+  const orchestrator = createLocalAgentOrchestrator(config, store, {
+    spawnWorker: async () => {},
+    refreshAvailability: () => availability,
+    checkProviderAvailability: (provider) => availability.find((entry) => entry.name === provider)!,
+  });
 
-test("explicit fallback picks the first available built-in provider", async (t) => {
-  const { project, orchestrator, captures } = await fixture(t);
-  const previous = process.env.PI_COMMAND;
-  process.env.PI_COMMAND = "/definitely/missing/devspace-pi";
-  try {
-    const { record, fallbackUsed } = await orchestrator.start({
+  await assert.rejects(
+    () => orchestrator.start({
       workspaceRoot: project,
       target: "pi",
       prompt: "do work",
-      fallback: true,
-    });
+      fallback: false,
+    }),
+    /pi provider is not available/,
+  );
+});
 
-    assert.equal(fallbackUsed, true);
-    assert.equal(record.provider, "codex");
-    const waited = await orchestrator.wait(record.id, 5);
-    assert.equal(waited.record.status, "idle");
-    assert.equal(captures.length, 1);
-    assert.equal(captures[0].provider, "codex");
-  } finally {
-    if (previous === undefined) delete process.env.PI_COMMAND;
-    else process.env.PI_COMMAND = previous;
-  }
+test("fallback defaults on and picks the first available built-in provider", async (t) => {
+  const { project, config, store, captures } = await fixture(t);
+  const availability = ALL_AVAILABLE.map((entry) =>
+    entry.name === "pi" ? { name: entry.name, available: false, reason: "missing" } : entry,
+  );
+  let orchestrator: LocalAgentOrchestrator;
+  orchestrator = createLocalAgentOrchestrator(config, store, {
+    runProvider: fakeRunProvider(captures),
+    spawnWorker: async (recordId, promptFile) => {
+      setTimeout(() => orchestrator.executeWorker(recordId, promptFile), 0);
+    },
+    refreshAvailability: () => availability,
+    checkProviderAvailability: (provider) => availability.find((entry) => entry.name === provider)!,
+  });
+
+  const { record, fallbackUsed } = await orchestrator.start({
+    workspaceRoot: project,
+    target: "pi",
+    prompt: "do work",
+  });
+
+  assert.equal(fallbackUsed, true);
+  assert.equal(record.provider, "codex");
+  assert.equal(record.fallbackEnabled, true);
+  const waited = await orchestrator.wait(record.id, 5);
+  assert.equal(waited.record.status, "idle");
+  assert.equal(captures.length, 1);
+  assert.equal(captures[0].provider, "codex");
+});
+
+test("continue refuses to start a second process for an active worker", async (t) => {
+  const { project, config, store } = await fixture(t);
+  const orchestrator = createLocalAgentOrchestrator(config, store, {
+    spawnWorker: async () => {},
+    refreshAvailability: () => ALL_AVAILABLE,
+    checkProviderAvailability: (provider) => ({ name: provider, available: true }),
+  });
+  const { record } = await orchestrator.start({
+    workspaceRoot: project,
+    target: "codex",
+    prompt: "first",
+  });
+  await assert.rejects(
+    () => orchestrator.continue(record.id, { prompt: "duplicate" }),
+    /already starting/,
+  );
+});
+
+test("global concurrency limit rejects additional active workers", async (t) => {
+  const { project, config, store } = await fixture(t);
+  const orchestrator = createLocalAgentOrchestrator({ ...config, agentsMaxConcurrent: 1 }, store, {
+    spawnWorker: async () => {},
+    refreshAvailability: () => ALL_AVAILABLE,
+    checkProviderAvailability: (provider) => ({ name: provider, available: true }),
+  });
+  await orchestrator.start({ workspaceRoot: project, target: "codex", prompt: "first" });
+  await assert.rejects(
+    () => orchestrator.start({ workspaceRoot: project, target: "claude", prompt: "second" }),
+    /concurrency limit reached \(1\/1\)/,
+  );
+});
+
+test("first-turn quota failure falls back to another available provider", async (t) => {
+  const { project, config, store } = await fixture(t);
+  const captures: RunCapture[] = [];
+  const runProvider = async (provider: LocalAgentProvider, input: LocalAgentRunInput): Promise<LocalAgentRunResult> => {
+    captures.push({ provider, input });
+    if (provider === "codex") throw new Error("quota exhausted for current billing cycle");
+    return {
+      provider,
+      providerSessionId: "fallback_session",
+      finalResponse: "fallback-ok",
+      items: [],
+    };
+  };
+  let orchestrator: LocalAgentOrchestrator;
+  orchestrator = createLocalAgentOrchestrator(config, store, {
+    runProvider,
+    spawnWorker: async (recordId, promptFile) => {
+      setTimeout(() => orchestrator.executeWorker(recordId, promptFile), 0);
+    },
+    refreshAvailability: () => ALL_AVAILABLE,
+    checkProviderAvailability: (provider) => ({ name: provider, available: true }),
+  });
+
+  const { record } = await orchestrator.start({
+    workspaceRoot: project,
+    target: "reviewer",
+    prompt: "review it",
+  });
+  const waited = await orchestrator.wait(record.id, 5);
+  assert.equal(waited.record.status, "idle");
+  assert.equal(waited.record.provider, "claude");
+  assert.equal(waited.record.latestResponse, "fallback-ok");
+  assert.deepEqual(captures.map((capture) => capture.provider), ["codex", "claude"]);
+  assert.equal(captures[1].input.model, undefined);
+  assert.equal(captures[1].input.thinking, undefined);
+  assert.match(captures[1].input.prompt, /Review changes\.\n\nTask:\nreview it/);
+});
+
+test("runtime fallback never moves an existing provider session", async (t) => {
+  const { project, config, store } = await fixture(t);
+  const captures: RunCapture[] = [];
+  let failWithQuota = false;
+  const runProvider = async (provider: LocalAgentProvider, input: LocalAgentRunInput): Promise<LocalAgentRunResult> => {
+    captures.push({ provider, input });
+    if (failWithQuota) throw new Error("quota exhausted for billing cycle");
+    return {
+      provider,
+      providerSessionId: "stable_session",
+      finalResponse: "first-ok",
+      items: [],
+    };
+  };
+  let orchestrator: LocalAgentOrchestrator;
+  orchestrator = createLocalAgentOrchestrator(config, store, {
+    runProvider,
+    spawnWorker: async (recordId, promptFile) => {
+      setTimeout(() => orchestrator.executeWorker(recordId, promptFile), 0);
+    },
+    refreshAvailability: () => ALL_AVAILABLE,
+    checkProviderAvailability: (provider) => ({ name: provider, available: true }),
+  });
+
+  const { record } = await orchestrator.start({ workspaceRoot: project, target: "codex", prompt: "first" });
+  assert.equal((await orchestrator.wait(record.id, 5)).record.status, "idle");
+  failWithQuota = true;
+  await orchestrator.continue(record.id, { prompt: "second" });
+  const waited = await orchestrator.wait(record.id, 5);
+  assert.equal(waited.record.status, "error");
+  assert.equal(waited.record.provider, "codex");
+  assert.deepEqual(captures.map((capture) => capture.provider), ["codex", "codex"]);
+  assert.equal(captures[1].input.providerSessionId, "stable_session");
+});
+
+test("runtime fallback does not mask non-capacity provider errors", async (t) => {
+  const { project, config, store } = await fixture(t);
+  let orchestrator: LocalAgentOrchestrator;
+  orchestrator = createLocalAgentOrchestrator(config, store, {
+    runProvider: async () => { throw new Error("authentication denied"); },
+    spawnWorker: async (recordId, promptFile) => {
+      setTimeout(() => orchestrator.executeWorker(recordId, promptFile), 0);
+    },
+    refreshAvailability: () => ALL_AVAILABLE,
+    checkProviderAvailability: (provider) => ({ name: provider, available: true }),
+  });
+  const { record } = await orchestrator.start({ workspaceRoot: project, target: "codex", prompt: "work" });
+  const waited = await orchestrator.wait(record.id, 5);
+  assert.equal(waited.record.status, "error");
+  assert.equal(waited.record.provider, "codex");
+  assert.match(waited.record.error ?? "", /authentication denied/);
 });
 
 test("inspect returns status, provider, profile, and latest response", async (t) => {

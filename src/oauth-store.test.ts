@@ -48,6 +48,7 @@ async function testDatabaseConfiguration(stateDir: string): Promise<void> {
       { version: 5, name: "local-agent-worker-pid" },
       { version: 6, name: "local-agent-execution-timeout" },
       { version: 7, name: "local-agent-grant-scope-root" },
+      { version: 8, name: "local-agent-fallback-enabled" },
     ]);
   } finally {
     database.close();

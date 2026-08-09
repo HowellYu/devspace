@@ -104,6 +104,8 @@ export interface CreateLocalAgentOrchestratorOptions {
     recordId: string,
     promptFile: string,
   ): ChildProcess | { pid?: number } | void | Promise<void>;
+  refreshAvailability?(): LocalAgentProviderAvailability[];
+  checkProviderAvailability?(provider: LocalAgentProvider): LocalAgentProviderAvailability;
 }
 
 const AGENTS_WAIT_DEFAULT_TIMEOUT_SECONDS = 300;
@@ -118,6 +120,8 @@ export function createLocalAgentOrchestrator(
   options: CreateLocalAgentOrchestratorOptions = {},
 ): LocalAgentOrchestrator {
   const runProvider = options.runProvider ?? runLocalAgentProvider;
+  const refreshAvailability = options.refreshAvailability ?? refreshLocalAgentProviderAvailabilitySnapshot;
+  const checkProviderAvailability = options.checkProviderAvailability ?? checkLocalAgentProviderAvailability;
   const spawnWorker = options.spawnWorker ?? ((recordId: string, promptFile: string) => {
     const record = store.get(recordId);
     if (!record) throw new Error(`Unknown subagent id: ${recordId}`);
@@ -187,6 +191,17 @@ export function createLocalAgentOrchestrator(
     watchdogs.set(record.id, timer);
   };
 
+  const assertWorkerCapacity = (excludeWorkerId?: string): void => {
+    const active = store.list()
+      .map((candidate) => reconcile(candidate))
+      .filter((candidate) => candidate.id !== excludeWorkerId && isActiveStatus(candidate.status));
+    if (active.length >= config.agentsMaxConcurrent) {
+      throw new Error(
+        `Subagent concurrency limit reached (${active.length}/${config.agentsMaxConcurrent}). Wait for or stop an active worker before starting another.`,
+      );
+    }
+  };
+
   const observeWorkerExit = (
     child: ChildProcess | { pid?: number } | void | Promise<void>,
     workerId: string,
@@ -211,7 +226,8 @@ export function createLocalAgentOrchestrator(
     },
 
     async start(input): Promise<StartWorkerResult> {
-      refreshLocalAgentProviderAvailabilitySnapshot();
+      assertWorkerCapacity();
+      refreshAvailability();
 
       const profiles = await loadLocalAgentProfiles(config, input.workspaceRoot);
       const target = resolveLocalAgentTarget(input.target, profiles, input.model, input.thinking);
@@ -221,8 +237,8 @@ export function createLocalAgentOrchestrator(
         );
       }
 
-      const availability = refreshLocalAgentProviderAvailabilitySnapshot();
-      const selected = selectProvider(target, availability, input.fallback);
+      const availability = refreshAvailability();
+      const selected = selectProvider(target, availability, input.fallback ?? true);
 
       const record = store.create({
         workspaceId: input.workspaceId,
@@ -233,6 +249,7 @@ export function createLocalAgentOrchestrator(
         model: selected.model,
         thinking: selected.thinking,
         executionTimeoutSeconds: parseAgentsExecutionTimeoutSeconds(input.executionTimeoutSeconds),
+        fallbackEnabled: input.fallback ?? true,
       });
 
       const promptFile = writeAgentPromptFile(input.prompt);
@@ -252,9 +269,14 @@ export function createLocalAgentOrchestrator(
       if (!record) {
         throw new Error(`Unknown subagent id: ${workerId}`);
       }
+      record = reconcile(record);
+      if (isActiveStatus(record.status)) {
+        throw new Error(`Subagent ${record.id} is already ${record.status}; wait for or stop it before continuing the same session.`);
+      }
+      assertWorkerCapacity(record.id);
 
-      refreshLocalAgentProviderAvailabilitySnapshot();
-      assertProviderAvailable(record.provider);
+      refreshAvailability();
+      assertProviderAvailable(record.provider, checkProviderAvailability);
 
       record = store.update(record.id, {
         status: "starting",
@@ -379,9 +401,39 @@ export function createLocalAgentOrchestrator(
       try {
         const profiles = await loadLocalAgentProfiles(config, record.workspaceRoot);
         const profile = profiles.find((candidate) => candidate.name === record.profileName);
-        const result = profile
-          ? await runProfileProvider(profile, record, prompt, runProvider)
-          : await runRawProvider(record, prompt, runProvider);
+        let activeRecord = store.get(record.id) ?? record;
+        let result: LocalAgentRunResult;
+        try {
+          result = await runConfiguredProvider(profile, activeRecord, prompt, runProvider);
+        } catch (primaryError) {
+          const current = store.get(record.id);
+          if (!current) throw primaryError;
+          const fallbackProvider = current.status !== "timed_out"
+            && current.fallbackEnabled
+            && !current.providerSessionId
+            && isRecoverableProviderFailure(primaryError)
+            ? selectRuntimeFallbackProvider(
+                current.provider as LocalAgentProvider,
+                refreshAvailability(),
+              )
+            : undefined;
+          if (!fallbackProvider) throw primaryError;
+
+          activeRecord = store.update(record.id, {
+            provider: fallbackProvider,
+            model: undefined,
+            thinking: undefined,
+            status: "running",
+            error: `Primary provider ${current.provider} failed with a recoverable capacity/quota error; retrying with ${fallbackProvider}.`,
+          });
+          try {
+            result = await runConfiguredProvider(profile, activeRecord, prompt, runProvider);
+          } catch (fallbackError) {
+            throw new Error(
+              `Primary provider ${current.provider} failed: ${errorMessage(primaryError)}; fallback provider ${fallbackProvider} failed: ${errorMessage(fallbackError)}`,
+            );
+          }
+        }
 
         const current = store.get(record.id);
         if (current?.status !== "timed_out") {
@@ -398,7 +450,7 @@ export function createLocalAgentOrchestrator(
         if (current?.status !== "timed_out") {
           store.update(record.id, {
             status: "error",
-            error: error instanceof Error ? error.message : String(error),
+            error: errorMessage(error),
             workerPid: undefined,
           });
         }
@@ -485,9 +537,23 @@ async function runProfileProvider(
     workspace: record.workspaceRoot,
     providerSessionId: record.providerSessionId,
     writeMode: "allowed",
-    model: record.model ?? profile.model,
-    thinking: record.thinking ?? profile.thinking,
+    model: record.provider === profile.provider ? (record.model ?? profile.model) : record.model,
+    thinking: record.provider === profile.provider ? (record.thinking ?? profile.thinking) : record.thinking,
   });
+}
+
+async function runConfiguredProvider(
+  profile: LocalAgentProfile | undefined,
+  record: LocalAgentRecord,
+  prompt: string,
+  runProvider: (
+    provider: LocalAgentProvider,
+    input: LocalAgentRunInput,
+  ) => Promise<LocalAgentRunResult>,
+): Promise<LocalAgentRunResult> {
+  return profile
+    ? runProfileProvider(profile, record, prompt, runProvider)
+    : runRawProvider(record, prompt, runProvider);
 }
 
 async function runRawProvider(
@@ -594,14 +660,56 @@ function selectProvider(
   };
 }
 
-function assertProviderAvailable(provider: string): void {
-  const availability = checkLocalAgentProviderAvailability(provider as LocalAgentProvider);
+function assertProviderAvailable(
+  provider: string,
+  checkAvailability: (provider: LocalAgentProvider) => LocalAgentProviderAvailability,
+): void {
+  const availability = checkAvailability(provider as LocalAgentProvider);
   if (availability.available) return;
   throw new Error(`${provider} provider is not available: ${availability.reason ?? "provider preflight failed"}`);
 }
 
 function isTerminalStatus(status: LocalAgentStatus): boolean {
   return status === "idle" || status === "error" || status === "stopped" || status === "timed_out";
+}
+
+function isActiveStatus(status: LocalAgentStatus): boolean {
+  return status === "starting" || status === "running";
+}
+
+function selectRuntimeFallbackProvider(
+  failedProvider: LocalAgentProvider,
+  availability: LocalAgentProviderAvailability[],
+): LocalAgentProvider | undefined {
+  return LOCAL_AGENT_PROVIDERS.find(
+    (provider) => provider !== failedProvider
+      && availability.find((candidate) => candidate.name === provider)?.available,
+  );
+}
+
+function isRecoverableProviderFailure(error: unknown): boolean {
+  const message = errorMessage(error).toLowerCase();
+  return [
+    "quota",
+    "billing cycle",
+    "rate limit",
+    "rate_limit",
+    "too many requests",
+    "resource exhausted",
+    "resource_exhausted",
+    "overloaded",
+    "capacity",
+    "temporarily unavailable",
+    "service unavailable",
+    "http 429",
+    "status 429",
+    "http 503",
+    "status 503",
+  ].some((needle) => message.includes(needle));
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 function hasExceededExecutionTimeout(record: LocalAgentRecord): boolean {

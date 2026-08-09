@@ -212,6 +212,7 @@ them into one of the active profile directories before use.
 | `COPILOT_COMMAND` | `copilot` | Executable for the `copilot` ACP provider. |
 | `DEVSPACE_AGENTS_WAIT_TIMEOUT` | `300` | Default `devspace agents wait` timeout in seconds (`1`-`3600`). This only controls how long the caller waits. |
 | `DEVSPACE_AGENTS_EXECUTION_TIMEOUT` | `600` | Default maximum runtime for each subagent run in seconds (`1`-`7200`). When exceeded, DevSpace terminates the worker and records `timed_out`. Override per run with `executionTimeoutSeconds` or CLI `--max-runtime`. |
+| `DEVSPACE_AGENTS_MAX_CONCURRENT` | `3` | Global maximum number of `starting`/`running` workers (`1`-`32`). Starting another worker fails closed until capacity is available. |
 | `DEVSPACE_PI_TIMEOUT_MS` | `120000` | Maximum wait for a `pi` subagent run to complete. Accepts an integer between `1000` and `3600000` milliseconds. |
 | `DEVSPACE_MACOS_SANDBOX` | `workspace` on macOS | Wrap workspace shells and detached subagent workers with macOS Seatbelt. Set `off` to disable. |
 | `DEVSPACE_SANDBOX_NETWORK` | `1` | Allow network access inside the macOS sandbox. Set `0` to deny network access. |
