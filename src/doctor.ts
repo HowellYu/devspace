@@ -1,4 +1,5 @@
 import { execFile, execFileSync } from "node:child_process";
+import { realpathSync } from "node:fs";
 import { createRequire } from "node:module";
 import { getShellConfig } from "@earendil-works/pi-coding-agent";
 import { satisfies } from "semver";
@@ -52,7 +53,7 @@ export async function runDoctorDiagnostics(config: DoctorConfig, env: NodeJS.Pro
   const cliVersion = typeof packageJson.version === "string" ? packageJson.version : "unknown";
   const cliPath = process.argv[1] ?? "unknown";
   const resolvedCli = resolveCliPath(env);
-  const cliPathMismatch = resolvedCli !== undefined && resolve(resolvedCli) !== resolve(cliPath);
+  const cliPathMismatch = resolvedCli !== undefined && !pathsReferToSameFile(resolvedCli, cliPath);
 
   return {
     configDir: files.dir,
@@ -174,6 +175,18 @@ export function checkBashShell(): string {
     const message = error instanceof Error ? error.message : String(error);
     return `unavailable (${message})`;
   }
+}
+
+export function pathsReferToSameFile(left: string, right: string): boolean {
+  const canonical = (value: string): string => {
+    const absolute = resolve(value);
+    try {
+      return realpathSync.native(absolute);
+    } catch {
+      return absolute;
+    }
+  };
+  return canonical(left) === canonical(right);
 }
 
 function resolveCliPath(env: NodeJS.ProcessEnv): string | undefined {

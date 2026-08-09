@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
+import { mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
-import { formatDoctorReport, runDoctorDiagnostics, nodeVersionStatus, checkSqliteNative } from "./doctor.js";
+import { formatDoctorReport, runDoctorDiagnostics, nodeVersionStatus, checkSqliteNative, pathsReferToSameFile } from "./doctor.js";
 
 test("nodeVersionStatus reports supported or unsupported", () => {
   const status = nodeVersionStatus();
@@ -9,6 +12,20 @@ test("nodeVersionStatus reports supported or unsupported", () => {
 
 test("checkSqliteNative reports ok when dependency loads", () => {
   assert.equal(checkSqliteNative(), "ok");
+});
+
+test("pathsReferToSameFile resolves symlink chains before comparing", () => {
+  const root = mkdtempSync(join(tmpdir(), "devspace-doctor-cli-path-"));
+  try {
+    const target = join(root, "target.js");
+    const link = join(root, "devspace");
+    writeFileSync(target, "#!/usr/bin/env node\n");
+    symlinkSync(target, link);
+    assert.equal(pathsReferToSameFile(link, target), true);
+    assert.equal(pathsReferToSameFile(link, join(root, "other.js")), false);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("runDoctorDiagnostics returns report without credentials", async () => {
