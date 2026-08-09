@@ -16,6 +16,7 @@ import {
   runDoctorDiagnostics,
 } from "./doctor.js";
 import { parseLocalAgentRunArgs } from "./local-agent-targets.js";
+import { isLocalAgentProvider, type LocalAgentProvider } from "./local-agent-profiles.js";
 import {
   formatLocalAgentProviderAvailabilitySummary,
   refreshLocalAgentProviderAvailabilitySnapshot,
@@ -44,6 +45,10 @@ import {
   validateTtlSeconds,
 } from "./path-grants.js";
 import {
+  createProviderAccessStore,
+  validateProviderAccessMode,
+} from "./provider-access.js";
+import {
   installLaunchdService,
   launchdServiceIsInstalled,
   printServiceHelp,
@@ -52,7 +57,7 @@ import {
 } from "./service.js";
 import { shutdownHttpServer } from "./server-shutdown.js";
 
-type Command = "serve" | "init" | "doctor" | "config" | "access" | "grants" | "agents" | "service" | "help" | "version";
+type Command = "serve" | "init" | "doctor" | "config" | "access" | "grants" | "provider-access" | "agents" | "service" | "help" | "version";
 const require = createRequire(import.meta.url);
 const SUPPORTED_NODE_RANGE = ">=20.12 <27";
 
@@ -82,6 +87,9 @@ async function main(argv: string[]): Promise<void> {
     case "grants":
       runGrantsCommand(args);
       return;
+    case "provider-access":
+      runProviderAccessCommand(args);
+      return;
     case "agents":
       await runAgentsCommand(args);
       return;
@@ -99,7 +107,7 @@ async function main(argv: string[]): Promise<void> {
 
 function normalizeCommand(command: string | undefined): Command {
   if (!command || command === "serve" || command === "start") return "serve";
-  if (command === "init" || command === "doctor" || command === "config" || command === "access" || command === "grants" || command === "agents" || command === "service") return command;
+  if (command === "init" || command === "doctor" || command === "config" || command === "access" || command === "grants" || command === "provider-access" || command === "agents" || command === "service") return command;
   if (command === "help" || command === "--help" || command === "-h") return "help";
   if (command === "version" || command === "--version" || command === "-v") return "version";
   throw new Error(`Unknown command: ${command}`);
@@ -567,6 +575,76 @@ function runGrantsCommand(args: string[]): void {
   ].join(" "));
 }
 
+function runProviderAccessCommand(args: string[]): void {
+  const [subcommand, ...rest] = args;
+  const config = loadConfig();
+  const store = createProviderAccessStore(config.stateDir);
+
+  if (!subcommand || subcommand === "help" || subcommand === "--help" || subcommand === "-h") {
+    console.log([
+      "DevSpace provider access (local control plane only)",
+      "",
+      "Usage:",
+      "  devspace provider-access list [--provider <provider>]",
+      "  devspace provider-access add <provider> <path> --access <read|readwrite>",
+      "  devspace provider-access remove <provider-access-id>",
+      "",
+      "Provider access is restricted to narrow files/directories inside that provider's own configuration root.",
+      "It is never exposed as an MCP mutation surface.",
+    ].join("\n"));
+    return;
+  }
+
+  if (subcommand === "list") {
+    let provider: LocalAgentProvider | undefined;
+    for (let index = 0; index < rest.length; index += 1) {
+      const flag = rest[index];
+      if (flag !== "--provider") throw new Error(`Unknown provider-access list argument: ${flag}`);
+      const raw = rest[index + 1];
+      if (!raw || !isLocalAgentProvider(raw)) throw new Error(`Invalid or missing provider for --provider: ${raw ?? ""}`);
+      provider = raw;
+      index += 1;
+    }
+    const records = store.list(provider);
+    if (records.length === 0) {
+      console.log("No provider-specific access entries.");
+      return;
+    }
+    for (const record of records) {
+      console.log([record.id, record.provider, record.access, record.kind, record.path].join(" "));
+    }
+    return;
+  }
+
+  if (subcommand === "remove") {
+    const [id, ...extra] = rest;
+    if (!id || extra.length > 0) throw new Error("Usage: devspace provider-access remove <provider-access-id>");
+    const removed = store.remove(id);
+    if (!removed) throw new Error(`Unknown provider access entry: ${id}`);
+    console.log(`Revoked ${removed.id}: ${removed.provider} ${removed.path}`);
+    return;
+  }
+
+  if (subcommand !== "add") throw new Error(`Unknown provider-access command: ${subcommand}`);
+  const [providerRaw, path, ...options] = rest;
+  if (!providerRaw || !isLocalAgentProvider(providerRaw) || !path) {
+    throw new Error("Usage: devspace provider-access add <provider> <path> --access <read|readwrite>");
+  }
+  let access: "read" | "readwrite" | undefined;
+  for (let index = 0; index < options.length; index += 1) {
+    const flag = options[index];
+    if (flag !== "--access") throw new Error(`Unknown provider-access add argument: ${flag}`);
+    const raw = options[index + 1];
+    if (!raw) throw new Error("Missing value for --access.");
+    access = validateProviderAccessMode(raw);
+    index += 1;
+  }
+  if (!access) throw new Error("--access read|readwrite is required for provider access.");
+
+  const record = store.add(providerRaw, path, access);
+  console.log(`Granted ${record.id}: ${record.provider} ${record.access} ${record.kind} ${record.path}`);
+}
+
 function printHelp(): void {
   console.log(
     [
@@ -581,6 +659,7 @@ function printHelp(): void {
       "  devspace config set publicBaseUrl <url|null>",
       "  devspace access ...      Manage persisted authorized project roots locally",
       "  devspace grants ...      Manage local-only scoped extra-path grants",
+      "  devspace provider-access ...  Manage provider-specific config access locally",
       "  devspace agents ls       List subagent sessions",
       "  devspace agents run <profile-or-provider-or-id> [--model <model>] [--thinking <level>] [--max-runtime <seconds>] <prompt>",
       "  devspace agents show <id>",

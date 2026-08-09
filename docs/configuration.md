@@ -225,9 +225,22 @@ than silently starting a new conversation.
 Workspace shells and subagents do not inherit the server's full environment.
 DevSpace forwards a small operational allowlist and provider executable-path
 overrides only. Secrets such as API keys, cloud credentials, database URLs, and
-`SSH_AUTH_SOCK` are excluded by default; provider credentials that need explicit
-forwarding should use the dedicated credential/grant mechanism rather than a
-broad environment passthrough.
+`SSH_AUTH_SOCK` are excluded by default.
+
+When a provider genuinely needs a file from its own local configuration tree,
+grant only that file or narrow directory through the local control plane:
+
+```bash
+devspace provider-access list [--provider codex]
+devspace provider-access add codex ~/.codex/config.toml --access read
+devspace provider-access remove provider_0123456789
+```
+
+Provider access is not exposed through MCP. Each provider is restricted to its
+own configuration root (for example Codex under `~/.codex` or Luna under
+`~/.kimi-code`), and the root itself cannot be granted wholesale. Prefer
+read-only entries and grant secret-bearing files only when that provider cannot
+operate without them.
 
 Legacy project paths such as `.pi/skills` can be added through `DEVSPACE_SKILL_PATHS` when needed.
 

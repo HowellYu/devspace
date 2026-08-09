@@ -35,6 +35,7 @@ import type { ReviewCheckpointManager } from "./review-checkpoints.js";
 import { resolveDevspaceCliPath } from "./service.js";
 import { buildSafeChildEnvironment } from "./process-environment.js";
 import { createPathGrantStore } from "./path-grants.js";
+import { createProviderAccessStore } from "./provider-access.js";
 import type { ServerConfig } from "./config.js";
 
 export interface StartWorkerInput {
@@ -423,6 +424,7 @@ function defaultSpawnWorker(config: ServerConfig, record: LocalAgentRecord, prom
     ],
   };
   const grantStore = createPathGrantStore(config.stateDir);
+  const providerAccess = createProviderAccessStore(config.stateDir).sandboxAccess(record.provider as LocalAgentProvider);
   const grantScopeRoot = record.grantScopeRoot ?? record.workspaceRoot;
   const command = shouldUseMacosSandbox(config)
     ? wrapMacosSandboxCommand(baseCommand, {
@@ -431,12 +433,18 @@ function defaultSpawnWorker(config: ServerConfig, record: LocalAgentRecord, prom
         readPaths: [
           ...workerSandboxReadPaths(config, record.provider),
           ...grantStore.readRoots(grantScopeRoot),
+          ...providerAccess.readPaths,
         ],
-        readFiles: [join(dirname(config.devspaceAgentsDir), "config.json")],
+        readFiles: [
+          join(dirname(config.devspaceAgentsDir), "config.json"),
+          ...providerAccess.readFiles,
+        ],
         writePaths: [
           ...config.sandboxWritePaths,
           ...grantStore.writeRoots(grantScopeRoot),
+          ...providerAccess.writePaths,
         ],
+        writeFiles: providerAccess.writeFiles,
         allowNetwork: config.sandboxNetwork,
       })
     : baseCommand;

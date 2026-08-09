@@ -187,6 +187,57 @@ if (process.platform !== "win32") {
   }
 }
 
+// devspace provider-access (local-only provider credential/config exceptions)
+
+if (process.platform !== "win32") {
+  const providerStateDir = mkdtempSync(join(tmpdir(), "devspace-cli-provider-access-state-"));
+  const providerConfigDir = mkdtempSync(join(tmpdir(), "devspace-cli-provider-access-config-"));
+  const providerTestDir = join(homedir(), ".codex", ".devspace-cli-provider-access-test");
+  const providerConfigFile = join(providerTestDir, "config.toml");
+  mkdirSync(providerTestDir, { recursive: true });
+  writeFileSync(providerConfigFile, "test = true\n", { mode: 0o600 });
+
+  const providerEnv = {
+    ...process.env,
+    DEVSPACE_CONFIG_DIR: providerConfigDir,
+    DEVSPACE_ALLOWED_ROOTS: process.cwd(),
+    DEVSPACE_STATE_DIR: providerStateDir,
+    DEVSPACE_OAUTH_OWNER_TOKEN: "test-owner-token-that-is-long-enough",
+  };
+  const runProviderAccessCli = (args: string[]): string =>
+    execFileSync("node", ["--import", "tsx", "src/cli.ts", ...args], {
+      cwd: process.cwd(),
+      encoding: "utf8",
+      env: providerEnv,
+    });
+
+  try {
+    const added = runProviderAccessCli([
+      "provider-access",
+      "add",
+      "codex",
+      providerConfigFile,
+      "--access",
+      "read",
+    ]);
+    const accessId = added.match(/Granted (provider_[a-f0-9]+):/)?.[1];
+    assert.ok(accessId);
+    assert.match(added, /codex read file/);
+
+    const listed = runProviderAccessCli(["provider-access", "list", "--provider", "codex"]);
+    assert.match(listed, new RegExp(accessId));
+    assert.match(listed, new RegExp(providerConfigFile.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+
+    const removed = runProviderAccessCli(["provider-access", "remove", accessId]);
+    assert.match(removed, /Revoked/);
+    assert.match(runProviderAccessCli(["provider-access", "list"]), /No provider-specific access entries/);
+  } finally {
+    rmSync(providerTestDir, { recursive: true, force: true });
+    rmSync(providerStateDir, { recursive: true, force: true });
+    rmSync(providerConfigDir, { recursive: true, force: true });
+  }
+}
+
 // devspace agents wait
 
 const waitRoot = mkdtempSync(join(tmpdir(), "devspace-cli-wait-test-"));

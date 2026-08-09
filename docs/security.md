@@ -174,6 +174,14 @@ system directories, broad home roots, and `~/.codex`. Provider credentials are a
 separate security surface rather than an excuse to grant an entire credential
 directory. A remote MCP session cannot create, approve, or revoke path grants.
 
+Provider-specific configuration exceptions use the local-only `devspace
+provider-access` control plane. Entries are bound to one provider and must name
+a file or subdirectory inside that provider's known configuration tree; the
+provider root itself cannot be granted wholesale. These entries feed only that
+provider worker's Seatbelt profile and are never generic workspace roots. Prefer
+read-only access and treat secret-bearing files such as provider auth databases
+or token files as explicit user-owned credential decisions.
+
 ## Logs
 
 By default, DevSpace logs requests and tool calls. Shell command previews are

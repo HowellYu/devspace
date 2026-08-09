@@ -92,10 +92,15 @@ API keys, cloud credentials, database URLs, or `SSH_AUTH_SOCK` from DevSpace.
 Extra filesystem paths must be explicit through the local control-plane grant
 surface; do not broaden them silently. `devspace access add/remove/list` manages
 whole authorized project roots, while `devspace grants add/remove/list` manages
-scoped `read`/`readwrite` extra paths for one canonical project. These mutation
-surfaces are deliberately not MCP tools: if a worker needs a new path, report the
-exact path and required access and escalate to the user/local steward rather than
-trying to self-authorize. For the strongest isolation, recommend a dedicated,
+scoped `read`/`readwrite` extra paths for one canonical project. Provider config
+exceptions are separate: `devspace provider-access add/remove/list` can grant one
+provider a narrow file or subdirectory inside that provider's own configuration
+tree, and the provider root itself cannot be granted wholesale. Prefer read-only
+provider entries and treat secret-bearing auth/token files as explicit user-owned
+credential decisions. These mutation surfaces are deliberately not MCP tools: if
+a worker needs a new path or provider credential file, report the exact path and
+required access and escalate to the user/local steward rather than trying to
+self-authorize. For the strongest isolation, recommend a dedicated,
 non-administrator OS account with filesystem permissions only for intended
 projects and DevSpace state.
 

@@ -10,6 +10,7 @@ export interface MacosSandboxPolicyInput {
   readPaths?: string[];
   readFiles?: string[];
   writePaths?: string[];
+  writeFiles?: string[];
   allowNetwork?: boolean;
 }
 
@@ -36,8 +37,9 @@ export function buildMacosSandboxProfile(input: MacosSandboxPolicyInput): string
     tmpdir(),
     ...(input.writePaths ?? []),
   ]);
+  const writeFiles = uniquePaths(input.writeFiles ?? []);
 
-  const metadataPaths = ancestorPaths([...readPaths, ...readFiles, ...writePaths]);
+  const metadataPaths = ancestorPaths([...readPaths, ...readFiles, ...writePaths, ...writeFiles]);
   const forms = [
     "(version 1)",
     "(allow default)",
@@ -48,6 +50,7 @@ export function buildMacosSandboxProfile(input: MacosSandboxPolicyInput): string
     allowSubpaths("file-read*", readPaths),
     allowLiterals("file-read*", readFiles),
     allowSubpaths("file-write*", writePaths),
+    allowLiterals("file-write*", writeFiles),
     '(allow file-write* (literal "/dev/null") (literal "/dev/tty") (literal "/dev/stderr") (literal "/dev/stdout"))',
     ...(input.allowNetwork === false ? ["(deny network*)"] : []),
   ];
