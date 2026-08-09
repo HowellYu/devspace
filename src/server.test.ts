@@ -271,11 +271,15 @@ test("open_workspace exposes project memory namespace and existing memory files"
   const structured = structuredContent(opened);
   assert.equal(typeof structured.memoryNamespace, "string");
   assert.ok(Array.isArray(structured.memoryFiles));
-  assert.deepEqual((structured.memoryFiles as string[]).sort(), ["decisions.md", "progress.md"]);
+  assert.deepEqual((structured.memoryFiles as string[]).sort(), ["context.md", "decisions.md", "next-steps.md", "progress.md"]);
   assert.equal(typeof structured.memoryRevision, "string");
-  assert.deepEqual(structured.memoryBootstrap, { "progress.md": "# Progress\n\nSetup done.\n" });
+  assert.deepEqual(structured.memoryBootstrap, {
+    "progress.md": "# Progress\n\nSetup done.\n",
+    "next-steps.md": "# Next Steps\n\n",
+    "context.md": "# Context\n\n",
+  });
   assert.equal(structured.memoryBootstrapTruncated, false);
-  assert.match(responseText(opened), /Project memory: decisions\.md, progress\.md/);
+  assert.match(responseText(opened), /Project memory: context\.md, decisions\.md, next-steps\.md, progress\.md/);
   assert.match(responseText(opened), /Automatic memory bootstrap:/);
   assert.doesNotMatch(responseText(opened), /Use SQLite/);
 
@@ -380,7 +384,7 @@ test("write_project_memory overwrites and updates existing memory files", async 
   assert.equal(secondRead, "v2\n");
 
   const listed = (await callTool(context.client, "list_project_memory", { workspaceId })).structuredContent as { files: string[] };
-  assert.deepEqual(listed.files, ["decisions.md"]);
+  assert.deepEqual(listed.files, ["context.md", "decisions.md", "next-steps.md", "progress.md"]);
 });
 
 interface ServerFixture {

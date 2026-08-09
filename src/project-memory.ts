@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { mkdir, opendir, readFile, rename, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
@@ -17,6 +17,11 @@ const MEMORY_BOOTSTRAP_FILES = ["progress.md", "next-steps.md", "context.md", "h
 const MEMORY_BOOTSTRAP_MAX_CHARS = 6_000;
 const MEMORY_BOOTSTRAP_FILE_MAX_CHARS = 2_500;
 const MEMORY_FILE_MAX_BYTES = 32 * 1024;
+const INITIAL_MEMORY_FILES: Readonly<Record<string, string>> = {
+  "context.md": "# Context\n\n",
+  "progress.md": "# Progress\n\n",
+  "next-steps.md": "# Next Steps\n\n",
+};
 
 export interface MemoryFileInfo {
   file: string;
@@ -108,11 +113,13 @@ class FileProjectMemoryManager implements ProjectMemoryManager {
   }
 
   async manifest(root: string): Promise<ProjectMemoryManifest> {
+    await this.ensureInitialized(root);
     const namespace = await effectiveMemoryNamespace(this.stateDir, root);
     return buildManifest(namespace);
   }
 
   async bootstrap(root: string): Promise<ProjectMemoryBootstrap> {
+    await this.ensureInitialized(root);
     const namespace = await effectiveMemoryNamespace(this.stateDir, root);
     const manifest = await buildManifest(namespace);
     const sections: Record<string, string> = {};
@@ -134,6 +141,13 @@ class FileProjectMemoryManager implements ProjectMemoryManager {
     }
 
     return { manifest, sections, truncated };
+  }
+
+  private async ensureInitialized(root: string): Promise<void> {
+    if ((await this.listFiles(root)).length > 0) return;
+    for (const [file, content] of Object.entries(INITIAL_MEMORY_FILES)) {
+      await this.writeFile(root, file, content);
+    }
   }
 }
 
@@ -216,7 +230,7 @@ async function buildManifest(namespace: string): Promise<ProjectMemoryManifest> 
 }
 
 async function writeManifestIndex(namespace: string, manifest: ProjectMemoryManifest): Promise<void> {
-  const tempPath = join(namespace, `${MEMORY_INDEX_FILE}.tmp`);
+  const tempPath = join(namespace, `${MEMORY_INDEX_FILE}.${process.pid}.${randomUUID()}.tmp`);
   const indexPath = join(namespace, MEMORY_INDEX_FILE);
   await writeFile(tempPath, `${JSON.stringify(manifest, null, 2)}\n`, { mode: 0o600 });
   await rename(tempPath, indexPath);

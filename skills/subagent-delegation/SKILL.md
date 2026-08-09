@@ -206,7 +206,11 @@ Well-known file names:
 - `handoff.md` — optional compact human-semantic handoff when structured state is insufficient.
 
 Memory is stored inside the workspace at `.devspace/memory/` (for example,
-`<workspace>/.devspace/memory/`). DevSpace creates `.devspace/.gitignore` with
+`<workspace>/.devspace/memory/`). On the first workspace bootstrap, if no usable
+project memory exists, DevSpace initializes compact `context.md`, `progress.md`,
+and `next-steps.md` files automatically. Treat this as mandatory workspace
+initialization: every future workspace should have a usable project-memory
+baseline without waiting for the user to ask. DevSpace creates `.devspace/.gitignore` with
 `memory/` so memory files are not committed by default; if you already have a
 `.devspace/.gitignore`, add `memory/` to keep memory local. It persists across
 sessions for the same canonical project root. Use it only for durable project

@@ -911,6 +911,10 @@ export function createMcpServer(
         { path, mode, baseRef },
         { conversationScopeId: openAiConversationScopeId(_meta) },
       );
+      const memoryRoot = workspaces.memoryRoot(workspace);
+      const memoryBootstrap = await memory.bootstrap(memoryRoot);
+      const memoryFiles = await memory.listFiles(memoryRoot);
+      const memoryNamespace = workspaces.memoryNamespaceId(workspace);
       await reviewCheckpoints.initializeWorkspace({
         workspaceId: workspace.id,
         root: workspace.root,
@@ -939,10 +943,6 @@ export function createMcpServer(
       const cardAvailableAgentsFiles = availableAgentsFiles.map((file) => ({
         path: formatAgentsPath(file.path, workspace.root),
       }));
-      const memoryRoot = workspaces.memoryRoot(workspace);
-      const memoryFiles = await memory.listFiles(memoryRoot);
-      const memoryBootstrap = await memory.bootstrap(memoryRoot);
-      const memoryNamespace = workspaces.memoryNamespaceId(workspace);
       const visibleSkills = includeBootstrapContext ? cardSkills : [];
       const visibleAgentProviders = includeBootstrapContext ? cardAgentProviders : [];
       const visibleAgents = includeBootstrapContext ? cardAgents : [];

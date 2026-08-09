@@ -209,9 +209,15 @@ Use these tools to access memory:
 
 Well-known memory file names:
 
+- `context.md` — compact stable project facts.
 - `decisions.md` — durable project decisions and rationale.
 - `progress.md` — current progress and completed milestones.
 - `next-steps.md` — pending work and next checkpoints.
+
+On first use of a canonical workspace, if no usable project memory exists,
+DevSpace automatically initializes compact `context.md`, `progress.md`, and
+`next-steps.md` files. Future workspace sessions must reuse this baseline rather
+than waiting for an explicit memory request from the user.
 
 `open_workspace` automatically returns the existing `memoryFiles`, a
 content-derived `memoryRevision`, and a bounded `memoryBootstrap`. The bootstrap

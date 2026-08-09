@@ -78,12 +78,28 @@ test("write, read, list, and overwrite memory files locally", async (t) => {
   await cleanup();
 });
 
+test("bootstrap initializes compact workspace memory when none exists", async (t) => {
+  const { manager, root, cleanup } = await fixture(t);
+
+  const bootstrap = await manager.bootstrap(root);
+  assert.deepEqual(Object.keys(bootstrap.sections), ["progress.md", "next-steps.md", "context.md"]);
+  assert.equal(bootstrap.sections["context.md"], "# Context\n\n");
+  assert.equal(bootstrap.sections["progress.md"], "# Progress\n\n");
+  assert.equal(bootstrap.sections["next-steps.md"], "# Next Steps\n\n");
+  assert.deepEqual(
+    (await manager.listFiles(root)).map((entry) => entry.file),
+    ["context.md", "next-steps.md", "progress.md"],
+  );
+
+  await cleanup();
+});
+
 test("manifest revisions change only when memory content changes", async (t) => {
   const { manager, root, cleanup } = await fixture(t);
 
-  const empty = await manager.manifest(root);
-  assert.equal(empty.version, 1);
-  assert.deepEqual(empty.files, {});
+  const initialized = await manager.manifest(root);
+  assert.equal(initialized.version, 1);
+  assert.deepEqual(Object.keys(initialized.files), ["context.md", "next-steps.md", "progress.md"]);
 
   await manager.writeFile(root, "progress.md", "phase one\n");
   const first = await manager.manifest(root);
