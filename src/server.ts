@@ -213,9 +213,7 @@ function serverInstructions(config: ServerConfig): string {
     ? " When the user supplies or generates a file that is not present on the DevSpace host, use download_artifact with its native file value, the existing workspace ID, and a suitable relative destination path chosen from the user's request and project structure. The tool refuses to overwrite an existing destination and returns the normalized workspace-relative path. Use normal workspace tools when explicit inspection, replacement, movement, renaming, or deletion is needed. Do not recreate binary files with write/edit calls or place signed URLs, native file objects, base64 content, or invented host paths in shell commands or logs."
     : "";
   const showChangesInstruction =
-    config.widgets === "changes"
-      ? " If the turn successfully modifies files by creating, editing, overwriting, deleting, moving, or applying patches, call show_changes exactly once for that workspace after the final related file change and before your final response so the user can inspect the aggregate diff for that turn. Do not call it after every individual file change; do not skip it because individual file-change tools already returned diffs."
-      : "";
+    " If the turn successfully modifies files by creating, editing, overwriting, deleting, moving, or applying patches, call show_changes exactly once for that workspace after the final related file change and before your final response so the user can inspect the aggregate diff for that turn. Do not call it after every individual file change; do not skip it because individual file-change tools already returned diffs.";
 
   if (config.toolMode === "codex") {
     return `Use DevSpace as a local coding workspace. Call ${toolNames.openWorkspace} once per project folder or worktree and reuse its workspaceId. Open it again when the workspaceId is invalid, the project changes, checkout/worktree mode changes, or another isolated worktree is needed. Use ${toolNames.read} for direct file reads, apply_patch for all file modifications, exec_command for inspection, tests, builds, and other commands, and write_stdin to poll or interact with running processes. Use ${toolNames.listProjectMemory}, ${toolNames.readProjectMemory}, and ${toolNames.writeProjectMemory} to access durable project memory across sessions; memory is stored inside the workspace at .devspace/memory/ and is only for durable project facts, decisions, and checkpoints. Follow instructions returned by ${toolNames.openWorkspace}; read applicable instruction and skill files before working in their scope.${artifactInstruction}${showChangesInstruction}`;
@@ -335,8 +333,12 @@ const inspectWorkerOutputSchema = workerBaseOutputSchema.extend({
   latestResponse: z.string().optional(),
   error: z.string().optional(),
   providerSessionId: z.string().optional(),
+  elapsedSeconds: z.number().int().nonnegative().optional(),
+  remainingExecutionSeconds: z.number().int().nonnegative().optional(),
   changedFiles: z.array(changedFileOutputSchema),
   checkpointSummary: checkpointSummaryOutputSchema.optional(),
+  patchPreview: z.string().optional(),
+  patchPreviewTruncated: z.boolean().optional(),
 });
 
 const stopWorkerOutputSchema = z.object({
@@ -899,12 +901,10 @@ export function createMcpServer(
         { path, mode, baseRef },
         { conversationScopeId: openAiConversationScopeId(_meta) },
       );
-      if (config.widgets === "changes") {
-        await reviewCheckpoints.initializeWorkspace({
-          workspaceId: workspace.id,
-          root: workspace.root,
-        });
-      }
+      await reviewCheckpoints.initializeWorkspace({
+        workspaceId: workspace.id,
+        root: workspace.root,
+      });
       const cardSkills = workspace.skills
         .filter((skill) => !skill.disableModelInvocation)
         .map((skill) => ({
@@ -1542,8 +1542,7 @@ export function createMcpServer(
     );
   }
 
-  if (config.widgets === "changes") {
-    registerAppTool(
+  registerAppTool(
       server,
       "show_changes",
       {
@@ -1595,7 +1594,6 @@ export function createMcpServer(
         };
       },
     );
-  }
 
   if (config.toolMode === "full") {
     registerAppTool(
@@ -2079,7 +2077,7 @@ function registerLocalAgentWorkerTools(
     {
       title: "Inspect worker",
       description:
-        "Return the current status, provider, profile, model, thinking, latest response, and provider session id for a worker. Also includes changed-file metadata when a review checkpoint is available.",
+        "Return the current status, provider, profile, model, thinking, latest response, provider session id, execution timing, changed-file metadata, and a bounded patch preview when review data is available.",
       inputSchema: {
         workspaceId: z.string().describe("Workspace identifier returned by open_workspace."),
         workerId: z.string().describe("Worker identifier returned by start_worker."),
@@ -2091,7 +2089,7 @@ function registerLocalAgentWorkerTools(
     async ({ workspaceId, workerId }) => {
       const startedAt = performance.now();
       workspaces.getWorkspace(workspaceId);
-      const { record, checkpoint } = await orchestrator.inspect(workerId, { reviewCheckpoints });
+      const { record, checkpoint, elapsedSeconds, remainingExecutionSeconds } = await orchestrator.inspect(workerId, { reviewCheckpoints });
       const result = `Worker ${workerId} status: ${record.status}.`;
       logToolCall(config, {
         tool: toolNames.inspectWorker,
@@ -2113,8 +2111,12 @@ function registerLocalAgentWorkerTools(
           latestResponse: record.latestResponse,
           error: record.error,
           providerSessionId: record.providerSessionId,
+          elapsedSeconds,
+          remainingExecutionSeconds,
           changedFiles: checkpoint?.files ?? [],
           checkpointSummary: checkpoint?.summary,
+          patchPreview: checkpoint?.patchPreview,
+          patchPreviewTruncated: checkpoint?.patchPreviewTruncated,
         },
       };
     },

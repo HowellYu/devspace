@@ -173,6 +173,33 @@ test("a concurrent review rejects a different root after initialization", async 
   }
 });
 
+test("non-git workspaces use a bounded filesystem review fallback", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "devspace-review-filesystem-test-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await writeFile(join(root, "notes.txt"), "one\ntwo\n");
+
+  const manager = createReviewCheckpointManager();
+  await manager.initializeWorkspace({ workspaceId: "ws_filesystem", root });
+  assert.equal((await manager.reviewChanges({ workspaceId: "ws_filesystem", root })).summary.files, 0);
+
+  await writeFile(join(root, "notes.txt"), "one\nchanged\n");
+  await writeFile(join(root, "new.txt"), "new\nfile\n");
+  const review = await manager.reviewChanges({
+    workspaceId: "ws_filesystem",
+    root,
+    markReviewed: false,
+  });
+  assert.deepEqual(review.files.map((file) => file.path), ["new.txt", "notes.txt"]);
+  assert.equal(review.summary.files, 2);
+  assert.match(review.patch, /\+changed/);
+  assert.match(review.patch, /\+new/);
+
+  await manager.reviewChanges({ workspaceId: "ws_filesystem", root, markReviewed: true });
+  const cleared = await manager.reviewChanges({ workspaceId: "ws_filesystem", root });
+  assert.equal(cleared.summary.files, 0);
+  assert.equal(cleared.patch, "");
+});
+
 test("an unborn repository becomes reviewable after its first commit", async (t) => {
   const root = await unbornRepository(t);
   const manager = createReviewCheckpointManager();

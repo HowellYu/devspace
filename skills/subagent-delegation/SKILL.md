@@ -30,8 +30,10 @@ Prefer the native MCP worker tools when the host supports them. Use the
   the worker, while an execution timeout terminates it and records `timed_out`.
   The default wait timeout is 300 seconds.
 - `inspect_worker({ workspaceId, workerId })` — quick status, latest response,
-  provider session id, and cheap changed-file metadata if a review checkpoint is
-  available.
+  provider session id, execution timing, changed-file metadata, and a bounded
+  patch preview when review data is available. This is a repository/process
+  checkpoint, not a claim that every provider streams structured intermediate
+  findings or test progress.
 - `continue_worker({ workspaceId, workerId, prompt, executionTimeoutSeconds? })` — send a follow-up that
   resumes the same provider conversation/session id. It keeps the worker's
   current runtime limit unless explicitly overridden.

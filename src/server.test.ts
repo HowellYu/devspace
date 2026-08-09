@@ -89,6 +89,17 @@ class FakeOrchestrator implements LocalAgentOrchestrator {
   async executeWorker(): Promise<void> {}
 }
 
+test("show_changes remains available when visual widgets are off", async (t) => {
+  const context = await fixture(t, { widgets: "off" });
+  const tools = await context.client.listTools();
+  assert.equal(tools.tools.some((tool) => tool.name === "show_changes"), true);
+
+  const workspaceId = structuredContent(await callOpen(context.client, context.project, "chat-review-off")).workspaceId as string;
+  await writeFile(join(context.project, "review-me.txt"), "visible without widgets\n");
+  const result = await callTool(context.client, "show_changes", { workspaceId });
+  assert.match(responseText(result), /Changed 1 file/);
+});
+
 test("open_workspace keeps lifecycle flags out of model output and preserves complete card metadata", async (t) => {
   const context = await fixture(t);
   const first = await callOpen(context.client, context.project, "chat-1");
@@ -375,7 +386,10 @@ interface ServerFixture {
   close: () => Promise<void>;
 }
 
-async function fixture(t: TestContext, options: { git?: boolean } = {}): Promise<ServerFixture> {
+async function fixture(
+  t: TestContext,
+  options: { git?: boolean; widgets?: "off" | "changes" | "full" } = {},
+): Promise<ServerFixture> {
   const root = await mkdtemp(join(tmpdir(), "devspace-server-test-"));
   const project = join(root, "project");
   const agentDir = join(root, "agent");
@@ -408,7 +422,7 @@ async function fixture(t: TestContext, options: { git?: boolean } = {}): Promise
     DEVSPACE_ALLOWED_ROOTS: root,
     DEVSPACE_WORKTREE_ROOT: join(root, ".worktrees"),
     DEVSPACE_AGENT_DIR: agentDir,
-    DEVSPACE_WIDGETS: "full",
+    DEVSPACE_WIDGETS: options.widgets ?? "full",
     DEVSPACE_TOOL_MODE: "full",
     DEVSPACE_SUBAGENTS: "true",
     DEVSPACE_OAUTH_OWNER_TOKEN: "test-owner-token-that-is-long-enough",

@@ -9,6 +9,7 @@ import { LocalAgentStore } from "./local-agent-store.js";
 import type { LocalAgentProvider } from "./local-agent-profiles.js";
 import type { LocalAgentProviderAvailability } from "./local-agent-availability.js";
 import type { LocalAgentRunInput, LocalAgentRunResult } from "./local-agent-runtime.js";
+import { createReviewCheckpointManager } from "./review-checkpoints.js";
 import {
   createLocalAgentOrchestrator,
   parseAgentsExecutionTimeoutSeconds,
@@ -321,6 +322,34 @@ test("inspect returns status, provider, profile, and latest response", async (t)
   assert.equal(inspected.record.provider, "codex");
   assert.equal(inspected.record.profileName, "reviewer");
   assert.ok(inspected.record.latestResponse?.includes("check it"));
+});
+
+test("inspect exposes execution timing and a bounded checkpoint patch preview", async (t) => {
+  const { project, config, store } = await fixture(t);
+  const reviewCheckpoints = createReviewCheckpointManager();
+  await reviewCheckpoints.initializeWorkspace({ workspaceId: "ws_inspect_preview", root: project });
+  const orchestrator = createLocalAgentOrchestrator(config, store, {
+    spawnWorker: async () => {},
+    refreshAvailability: () => ALL_AVAILABLE,
+    checkProviderAvailability: (provider) => ({ name: provider, available: true }),
+  });
+  const { record } = await orchestrator.start({
+    workspaceId: "ws_inspect_preview",
+    workspaceRoot: project,
+    target: "codex",
+    prompt: "slow task",
+    executionTimeoutSeconds: 600,
+  });
+  await writeFile(join(project, "worker-change.txt"), "worker preview\n");
+
+  const inspected = await orchestrator.inspect(record.id, { reviewCheckpoints });
+  assert.equal(inspected.record.status, "starting");
+  assert.equal(typeof inspected.elapsedSeconds, "number");
+  assert.equal(typeof inspected.remainingExecutionSeconds, "number");
+  assert.ok((inspected.remainingExecutionSeconds ?? 0) <= 600);
+  assert.equal(inspected.checkpoint?.summary.files, 1);
+  assert.match(inspected.checkpoint?.patchPreview ?? "", /worker preview/);
+  assert.equal(inspected.checkpoint?.patchPreviewTruncated, false);
 });
 
 test("wait returns timedOut true for a still-running worker", async (t) => {

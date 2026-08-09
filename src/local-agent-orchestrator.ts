@@ -73,6 +73,8 @@ export interface InspectWorkerOptions {
 
 export interface InspectWorkerResult {
   record: LocalAgentRecord;
+  elapsedSeconds?: number;
+  remainingExecutionSeconds?: number;
   checkpoint?: {
     summary: { files: number; additions: number; removals: number };
     files: Array<{
@@ -82,6 +84,8 @@ export interface InspectWorkerResult {
       removals: number;
       previousPath?: string;
     }>;
+    patchPreview?: string;
+    patchPreviewTruncated?: boolean;
   };
 }
 
@@ -113,6 +117,7 @@ const AGENTS_WAIT_MAX_TIMEOUT_SECONDS = 3600;
 const AGENTS_EXECUTION_DEFAULT_TIMEOUT_SECONDS = 600;
 const AGENTS_EXECUTION_MAX_TIMEOUT_SECONDS = 7200;
 const AGENTS_WAIT_POLL_MS = 750;
+const INSPECT_PATCH_PREVIEW_MAX_CHARS = 20_000;
 
 export function createLocalAgentOrchestrator(
   config: ServerConfig,
@@ -327,6 +332,16 @@ export function createLocalAgentOrchestrator(
       const record = reconcile(stored);
 
       const result: InspectWorkerResult = { record };
+      if (isActiveStatus(record.status)) {
+        const startedAt = Date.parse(record.updatedAt);
+        if (Number.isFinite(startedAt)) {
+          const elapsedSeconds = Math.max(0, Math.floor((Date.now() - startedAt) / 1000));
+          result.elapsedSeconds = elapsedSeconds;
+          if (record.executionTimeoutSeconds !== undefined) {
+            result.remainingExecutionSeconds = Math.max(0, record.executionTimeoutSeconds - elapsedSeconds);
+          }
+        }
+      }
 
       if (options.reviewCheckpoints && record.workspaceId) {
         try {
@@ -336,6 +351,7 @@ export function createLocalAgentOrchestrator(
             since: "last_shown",
             markReviewed: false,
           });
+          const patchPreviewTruncated = review.patch.length > INSPECT_PATCH_PREVIEW_MAX_CHARS;
           result.checkpoint = {
             summary: {
               files: review.summary.files,
@@ -349,6 +365,10 @@ export function createLocalAgentOrchestrator(
               removals: file.removals,
               previousPath: file.previousPath,
             })),
+            patchPreview: review.patch
+              ? review.patch.slice(0, INSPECT_PATCH_PREVIEW_MAX_CHARS)
+              : undefined,
+            patchPreviewTruncated: review.patch ? patchPreviewTruncated : undefined,
           };
         } catch {
           // Omit checkpoint data when review checkpoints are unavailable.

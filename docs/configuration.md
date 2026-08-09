@@ -158,9 +158,9 @@ sessions.
 
 | Value | Behavior |
 | --- | --- |
-| `full` | Default. Widget UI is attached to exposed workspace, file, edit, and shell tools. |
-| `changes` | Enables the aggregate `show_changes` tool and attaches widget UI to `open_workspace` and `show_changes`. |
-| `off` | Disables widget UI. |
+| `full` | Default. Widget UI is attached to exposed workspace, file, edit, and shell tools. `show_changes` remains available as a normal review tool. |
+| `changes` | Limits widget UI to `open_workspace` and `show_changes`; the review tool itself is available in every widget mode. |
+| `off` | Disables widget UI while keeping `show_changes` available as a text/structured MCP tool. |
 
 ## Skills
 

@@ -244,6 +244,9 @@ Per-tool widget cards are enabled by default with:
 DEVSPACE_WIDGETS=full
 ```
 
-The aggregate `show_changes` tool is only exposed with
-`DEVSPACE_WIDGETS=changes`. Plain MCP clients may ignore ChatGPT Apps widget
-metadata and only show text results.
+The aggregate `show_changes` tool is exposed in every widget mode. Set
+`DEVSPACE_WIDGETS=changes` to attach the dedicated review widget or
+`DEVSPACE_WIDGETS=off` for text/structured results only. Git workspaces use
+durable review refs; non-Git workspaces use a bounded in-memory filesystem
+snapshot fallback. Plain MCP clients may ignore ChatGPT Apps widget metadata and
+only show text results.

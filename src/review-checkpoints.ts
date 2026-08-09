@@ -1,4 +1,5 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { mkdtemp, readdir, readFile, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { git, getGitEligibility, safeWorkspaceRefSegment } from "./git.js";
@@ -26,9 +27,20 @@ export interface ReviewChangesResult {
   patch: string;
 }
 
+interface FilesystemFileSnapshot {
+  hash: string;
+  size: number;
+  text?: string;
+  lineCount: number;
+}
+
+type FilesystemSnapshot = Map<string, FilesystemFileSnapshot>;
+
 interface WorkspaceReviewState {
   root: string;
   gitRoot?: string;
+  filesystemOpen?: FilesystemSnapshot;
+  filesystemBaseline?: FilesystemSnapshot;
   openRef: string;
   baselineRef: string;
   openRefAvailable: boolean;
@@ -47,6 +59,19 @@ export interface ReviewCheckpointManager {
 }
 
 const REVIEW_REF_PREFIX = "refs/devspace/review";
+const FILESYSTEM_SNAPSHOT_MAX_TEXT_BYTES = 1024 * 1024;
+const FILESYSTEM_PATCH_MAX_CHARS = 200_000;
+const FILESYSTEM_IGNORED_DIRECTORIES = new Set([
+  ".git",
+  "node_modules",
+  ".venv",
+  "venv",
+  "dist",
+  "build",
+  ".next",
+  "DerivedData",
+  "Pods",
+]);
 
 export function createReviewCheckpointManager(): ReviewCheckpointManager {
   const states = new Map<string, WorkspaceReviewState>();
@@ -88,7 +113,14 @@ export function createReviewCheckpointManager(): ReviewCheckpointManager {
       assertWorkspaceRoot(state, workspaceId, root);
 
       if (!state?.gitRoot) {
-        throw new Error(state?.diagnostic ?? "show_changes requires a Git workspace in this version.");
+        if (!state?.filesystemOpen || !state.filesystemBaseline) {
+          throw new Error(state?.diagnostic ?? "Review state is unavailable for this workspace.");
+        }
+        const baseline = since === "workspace_open" ? state.filesystemOpen : state.filesystemBaseline;
+        const current = await createFilesystemSnapshot(root);
+        const review = compareFilesystemSnapshots(baseline, current);
+        if (markReviewed) state.filesystemBaseline = current;
+        return review;
       }
 
       let effectiveSince = since;
@@ -165,7 +197,12 @@ async function initializeWorkspaceState(
   try {
     const eligibility = await getGitEligibility(root);
     if (!eligibility.ok || !eligibility.gitRoot) {
-      state.diagnostic = eligibility.message ?? "show_changes requires a Git workspace in this version.";
+      if (eligibility.reason === "not_git") {
+        const snapshot = await createFilesystemSnapshot(root);
+        state.filesystemOpen = snapshot;
+        state.filesystemBaseline = snapshot;
+      }
+      state.diagnostic = eligibility.message ?? "Review initialization failed.";
       return;
     }
 
@@ -194,7 +231,7 @@ async function initializeWorkspaceState(
 }
 
 function isReadyState(state: WorkspaceReviewState | undefined): boolean {
-  return state?.gitRoot !== undefined;
+  return state?.gitRoot !== undefined || state?.filesystemBaseline !== undefined;
 }
 
 async function commitForRef(gitRoot: string, ref: string): Promise<string | undefined> {
@@ -239,6 +276,141 @@ function checkpointEnv(indexPath: string): NodeJS.ProcessEnv {
     GIT_COMMITTER_NAME: "DevSpace",
     GIT_COMMITTER_EMAIL: "devspace@users.noreply.local",
   };
+}
+
+async function createFilesystemSnapshot(root: string): Promise<FilesystemSnapshot> {
+  const snapshot: FilesystemSnapshot = new Map();
+  await walkFilesystemSnapshot(root, root, snapshot);
+  return snapshot;
+}
+
+async function walkFilesystemSnapshot(
+  root: string,
+  directory: string,
+  snapshot: FilesystemSnapshot,
+): Promise<void> {
+  const entries = await readdir(directory, { withFileTypes: true });
+  for (const entry of entries) {
+    if (entry.isSymbolicLink()) continue;
+    if (entry.isDirectory() && FILESYSTEM_IGNORED_DIRECTORIES.has(entry.name)) continue;
+    const absolutePath = join(directory, entry.name);
+    if (entry.isDirectory()) {
+      await walkFilesystemSnapshot(root, absolutePath, snapshot);
+      continue;
+    }
+    if (!entry.isFile()) continue;
+
+    const relativePath = absolutePath.slice(root.length + 1);
+    const info = await stat(absolutePath);
+    const content = await readFile(absolutePath);
+    const hash = createHash("sha256").update(content).digest("hex");
+    const isText = info.size <= FILESYSTEM_SNAPSHOT_MAX_TEXT_BYTES && !content.includes(0);
+    const text = isText ? content.toString("utf8") : undefined;
+    snapshot.set(relativePath, {
+      hash,
+      size: info.size,
+      text,
+      lineCount: text === undefined ? 0 : splitLines(text).length,
+    });
+  }
+}
+
+function compareFilesystemSnapshots(
+  baseline: FilesystemSnapshot,
+  current: FilesystemSnapshot,
+): ReviewChangesResult {
+  const paths = Array.from(new Set([...baseline.keys(), ...current.keys()])).sort();
+  const files: ReviewFile[] = [];
+  const patchParts: string[] = [];
+
+  for (const path of paths) {
+    const before = baseline.get(path);
+    const after = current.get(path);
+    if (before?.hash === after?.hash) continue;
+
+    if (!before && after) {
+      files.push({ path, type: "new", additions: after.lineCount, removals: 0 });
+      patchParts.push(filesystemPatch(path, undefined, after));
+      continue;
+    }
+    if (before && !after) {
+      files.push({ path, type: "deleted", additions: 0, removals: before.lineCount });
+      patchParts.push(filesystemPatch(path, before, undefined));
+      continue;
+    }
+    if (!before || !after) continue;
+
+    const counts = changedLineCounts(before.text, after.text);
+    files.push({ path, type: "change", additions: counts.additions, removals: counts.removals });
+    patchParts.push(filesystemPatch(path, before, after));
+  }
+
+  const summary = summarizeFiles(files);
+  let patch = patchParts.filter(Boolean).join("\n");
+  if (patch.length > FILESYSTEM_PATCH_MAX_CHARS) {
+    patch = `${patch.slice(0, FILESYSTEM_PATCH_MAX_CHARS)}\n... filesystem patch preview truncated ...\n`;
+  }
+  return {
+    result: summary.files === 0
+      ? "No changes since last shown changes."
+      : `Changed ${summary.files} ${summary.files === 1 ? "file" : "files"} (+${summary.additions} -${summary.removals}).`,
+    summary,
+    files,
+    patch,
+  };
+}
+
+function changedLineCounts(before: string | undefined, after: string | undefined): { additions: number; removals: number } {
+  if (before === undefined || after === undefined) return { additions: 0, removals: 0 };
+  const beforeLines = splitLines(before);
+  const afterLines = splitLines(after);
+  let prefix = 0;
+  while (prefix < beforeLines.length && prefix < afterLines.length && beforeLines[prefix] === afterLines[prefix]) prefix += 1;
+  let suffix = 0;
+  while (
+    suffix < beforeLines.length - prefix
+    && suffix < afterLines.length - prefix
+    && beforeLines[beforeLines.length - 1 - suffix] === afterLines[afterLines.length - 1 - suffix]
+  ) suffix += 1;
+  return {
+    additions: Math.max(0, afterLines.length - prefix - suffix),
+    removals: Math.max(0, beforeLines.length - prefix - suffix),
+  };
+}
+
+function filesystemPatch(
+  path: string,
+  before: FilesystemFileSnapshot | undefined,
+  after: FilesystemFileSnapshot | undefined,
+): string {
+  if (before?.text === undefined && after?.text === undefined) {
+    return `--- ${before ? path : "/dev/null"}\n+++ ${after ? path : "/dev/null"}\nBinary or large file changed (${before?.size ?? 0} -> ${after?.size ?? 0} bytes).\n`;
+  }
+  const beforeLines = splitLines(before?.text ?? "");
+  const afterLines = splitLines(after?.text ?? "");
+  let prefix = 0;
+  while (prefix < beforeLines.length && prefix < afterLines.length && beforeLines[prefix] === afterLines[prefix]) prefix += 1;
+  let suffix = 0;
+  while (
+    suffix < beforeLines.length - prefix
+    && suffix < afterLines.length - prefix
+    && beforeLines[beforeLines.length - 1 - suffix] === afterLines[afterLines.length - 1 - suffix]
+  ) suffix += 1;
+  const removed = beforeLines.slice(prefix, beforeLines.length - suffix);
+  const added = afterLines.slice(prefix, afterLines.length - suffix);
+  const lines = [
+    `--- ${before ? path : "/dev/null"}`,
+    `+++ ${after ? path : "/dev/null"}`,
+    `@@ -${prefix + 1},${removed.length} +${prefix + 1},${added.length} @@`,
+    ...removed.map((line) => `-${line}`),
+    ...added.map((line) => `+${line}`),
+  ];
+  return `${lines.join("\n")}\n`;
+}
+
+function splitLines(text: string): string[] {
+  if (text.length === 0) return [];
+  return text.replace(/\r\n/g, "\n").split("\n");
 }
 
 function parseNumstat(output: string): ReviewFile[] {

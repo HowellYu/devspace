@@ -258,15 +258,18 @@ a PTY, or send Ctrl-C. Set `tty: true` only for commands that need a terminal.
 By default, `DEVSPACE_WIDGETS=full`.
 
 In that mode, DevSpace attaches widget UI to the exposed workspace, file, edit,
-and shell tools. The aggregate `show_changes` tool is not exposed by default.
+and shell tools. The aggregate `show_changes` review tool is always exposed;
+widget mode controls only whether/how visual UI is attached to it.
 
 Use `DEVSPACE_WIDGETS=off` to disable widget UI, or `DEVSPACE_WIDGETS=changes`
-to expose the aggregate show-changes flow.
+to attach widgets only to the workspace/change-review flow.
 
-When `show_changes` is exposed, call it exactly once after the final file
-modification in any turn that changes files. It shows the combined changes for
-that turn and advances the review point automatically. Reusing a workspace does
-not change this workflow.
+Call `show_changes` exactly once after the final file modification in any turn
+that changes files. It shows the combined changes for that turn and advances the
+review point automatically. Git workspaces use durable Git review checkpoints;
+non-Git workspaces use a bounded in-memory filesystem snapshot that skips
+symlinks and common dependency/build directories. Reusing a workspace does not
+change this workflow.
 
 ## Shell Use
 
