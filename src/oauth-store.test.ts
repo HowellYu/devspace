@@ -24,6 +24,7 @@ try {
   testPersistenceAndTokenHashing(join(root, "persistence"));
   testExpiredTokenCleanup(join(root, "expiration"));
   testTransactionalTokenRotation(join(root, "rotation"));
+  testDurableChatGptApproval(join(root, "approval"));
   await testProviderRestartRotationAndRevocation(join(root, "provider"));
 } finally {
   await rm(root, { recursive: true, force: true });
@@ -49,6 +50,7 @@ async function testDatabaseConfiguration(stateDir: string): Promise<void> {
       { version: 6, name: "local-agent-execution-timeout" },
       { version: 7, name: "local-agent-grant-scope-root" },
       { version: 8, name: "local-agent-fallback-enabled" },
+      { version: 9, name: "oauth-client-approvals" },
     ]);
   } finally {
     database.close();
@@ -137,6 +139,51 @@ function testExpiredTokenCleanup(stateDir: string): void {
     assert.equal(reopened.getRefreshToken("expired-refresh-hash"), undefined);
   } finally {
     reopened.close();
+  }
+}
+
+function testDurableChatGptApproval(stateDir: string): void {
+  const firstStore = new SqliteOAuthStore(stateDir);
+  const firstClient = new SqliteOAuthClientsStore(firstStore, oauthConfig.allowedRedirectHosts).registerClient({
+    redirect_uris: [redirectUri],
+    client_name: "ChatGPT",
+  });
+  const replacementRedirectUri = "https://chatgpt.com/connector/oauth/replacement";
+  const replacementClient = new SqliteOAuthClientsStore(firstStore, oauthConfig.allowedRedirectHosts).registerClient({
+    redirect_uris: [replacementRedirectUri],
+    client_name: "ChatGPT",
+  });
+
+  const reusable = {
+    client: replacementClient,
+    redirectUri: replacementRedirectUri,
+    scopes: ["devspace"],
+    resource: mcpUrl.href,
+  };
+  assert.equal(firstStore.hasReusableAuthorization(reusable), false);
+  firstStore.rememberAuthorization({
+    client: firstClient,
+    redirectUri,
+    scopes: ["devspace"],
+    resource: mcpUrl.href,
+  });
+  firstStore.saveRefreshToken("approval-refresh-hash", {
+    clientId: firstClient.client_id,
+    scopes: ["devspace"],
+    expiresAt: Math.floor(Date.now() / 1000) + 3600,
+    resource: mcpUrl.href,
+  });
+  assert.equal(firstStore.hasReusableAuthorization(reusable), true);
+  firstStore.close();
+
+  const restoredStore = new SqliteOAuthStore(stateDir);
+  try {
+    assert.equal(restoredStore.hasReusableAuthorization(reusable), true);
+    restoredStore.forgetAuthorizationsForClient(replacementClient);
+    assert.equal(restoredStore.hasReusableAuthorization(reusable), false);
+    assert.equal(restoredStore.getRefreshToken("approval-refresh-hash"), undefined);
+  } finally {
+    restoredStore.close();
   }
 }
 

@@ -1,6 +1,7 @@
 import { realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import type { LocalAgentProvider } from "./local-agent-profiles.js";
 import type { ServerConfig } from "./config.js";
 
@@ -75,6 +76,13 @@ export function workerSandboxReadPaths(
   env: NodeJS.ProcessEnv = process.env,
 ): string[] {
   const paths = [config.devspaceAgentsDir, ...config.sandboxReadPaths];
+  if (provider === "luna") {
+    // Luna's project-scoped Playwright/Xcode MCP helpers live in the same
+    // installed DevSpace package as this runtime. Grant read-only access to that
+    // package root so their code and bundled dependencies can load; do not grant
+    // any broader home-directory or unrelated-project access.
+    paths.push(dirname(dirname(fileURLToPath(import.meta.url))));
+  }
   const providerCommand = configuredProviderCommand(provider as LocalAgentProvider, env);
   if (providerCommand && isAbsolute(providerCommand)) paths.push(dirname(resolve(providerCommand)));
   return uniquePaths(paths);
@@ -82,8 +90,8 @@ export function workerSandboxReadPaths(
 
 function configuredProviderCommand(provider: LocalAgentProvider, env: NodeJS.ProcessEnv): string | undefined {
   switch (provider) {
-    case "luna":
-      return env.LUNA_COMMAND;
+    case "kimi":
+      return env.KIMI_COMMAND ?? env.LUNA_COMMAND;
     case "cursor":
       return env.CURSOR_COMMAND;
     case "copilot":

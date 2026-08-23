@@ -64,25 +64,27 @@ provider: codex
 provider: claude
 provider: opencode
 provider: pi
+provider: luna
+provider: kimi
 provider: cursor
 provider: copilot
-provider: luna
 ```
 
 Unsupported or custom providers are rejected. DevSpace maps providers to their
 native integration:
 
-- `codex`: Codex SDK
+- `luna`: OpenAI Codex SDK using a Keychain-backed API key, hard-locked to `gpt-5.6-luna`
+- `kimi`: ACP using the Kimi Code CLI (`kimi acp`; override with `KIMI_COMMAND`, legacy `LUNA_COMMAND` also works)
+- `codex`: generic Codex SDK provider; retained for compatibility but not used by the default brain/worker policy
 - `claude`: Claude Code SDK
 - `opencode`: OpenCode SDK
 - `pi`: Pi RPC mode
 - `cursor`: ACP
 - `copilot`: ACP
-- `luna`: ACP (Kimi Code CLI, `kimi acp`; override the binary with `LUNA_COMMAND`)
 
 ### `model`
 
-Optional provider model id or alias.
+Optional provider model id or alias. The `luna` provider is an exception: it is hard-locked to `gpt-5.6-luna`; omitting `model` is recommended and any other value is rejected.
 
 ```yaml
 model: gpt-5.4
@@ -103,11 +105,12 @@ thinking: xhigh
 
 DevSpace passes this through to providers that expose a matching control:
 
+- `luna`: OpenAI model reasoning effort. Supported values are `low`, `medium`, `high`, and `xhigh`; default is `medium`. The supervising brain should choose the lowest effort appropriate for the bounded task.
 - `claude`: SDK effort with adaptive thinking.
 - `codex`: SDK model reasoning effort.
 - `pi`: `--thinking`.
 - `opencode`: model variant.
-- `cursor`, `copilot`, and `luna`: ACP thought-level config when supported.
+- `cursor`, `copilot`, and `kimi`: ACP thought-level config when supported.
 
 ### `disabled`
 

@@ -102,7 +102,7 @@ try {
       "---",
       "name: luna-worker",
       "description: Kimi implementation worker.",
-      "provider: luna",
+      "provider: kimi",
       "model: kimi-k2.5",
       "thinking: xhigh",
       "---",
@@ -113,13 +113,13 @@ try {
   );
   const profilesWithKimi = await loadLocalAgentProfiles(enabledConfig, workspaceRoot);
   const kimiProfile = profilesWithKimi.find((profile) => profile.name === "luna-worker");
-  assert.equal(kimiProfile?.provider, "luna");
+  assert.equal(kimiProfile?.provider, "kimi");
   assert.equal(kimiProfile?.model, "kimi-k2.5");
   assert.equal(kimiProfile?.thinking, "xhigh");
   assert.deepEqual(summarizeLocalAgentProfile(kimiProfile!), {
     name: "luna-worker",
     description: "Kimi implementation worker.",
-    provider: "luna",
+    provider: "kimi",
     model: "kimi-k2.5",
     thinking: "xhigh",
   });
@@ -145,7 +145,7 @@ try {
     await mkdir(workspaceRoot, { recursive: true });
 
     const examplesDir = new URL("../examples/agents/", import.meta.url);
-    for (const name of ["luna-worker.md", "luna-explorer.md"]) {
+    for (const name of ["luna-worker.md", "luna-explorer.md", "kimi-worker.md", "kimi-explorer.md"]) {
       const source = await readFile(new URL(name, examplesDir), "utf8");
       await writeFile(join(configDir, "agents", name), source);
     }
@@ -157,13 +157,19 @@ try {
       DEVSPACE_OAUTH_OWNER_TOKEN: "test-owner-token-that-is-long-enough",
     });
     const profiles = await loadLocalAgentProfiles(config, workspaceRoot);
-    assert.deepEqual(profiles.map((profile) => profile.name), ["luna-explorer", "luna-worker"]);
+    assert.deepEqual(profiles.map((profile) => profile.name), ["kimi-explorer", "kimi-worker", "luna-explorer", "luna-worker"]);
     for (const profile of profiles) {
-      assert.equal(profile.provider, "luna");
-      // Model and thinking stay unset until validated against live Kimi ACP
-      // config options; the Kimi CLI defaults apply when omitted.
       assert.equal(profile.model, undefined);
-      assert.equal(profile.thinking, undefined);
+      if (profile.name === "luna-worker") {
+        assert.equal(profile.provider, "luna");
+        assert.equal(profile.thinking, "medium");
+      } else if (profile.name === "luna-explorer") {
+        assert.equal(profile.provider, "luna");
+        assert.equal(profile.thinking, "low");
+      } else {
+        assert.equal(profile.provider, "kimi");
+        assert.equal(profile.thinking, undefined);
+      }
       assert.ok(profile.body.length > 0);
     }
   } finally {

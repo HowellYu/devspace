@@ -1,15 +1,21 @@
 import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { resolve } from "node:path";
+import { mkdirSync } from "node:fs";
+import { homedir } from "node:os";
+import { join, resolve } from "node:path";
 import { Readable, Writable } from "node:stream";
+import { fileURLToPath } from "node:url";
 import type { EffortLevel } from "@anthropic-ai/claude-agent-sdk";
 import type { ActiveSession, ClientContext } from "@agentclientprotocol/sdk";
 import type { LocalAgentProvider } from "./local-agent-profiles.js";
 import { removeDevspaceNodeModulesBinFromPath } from "./local-agent-path.js";
 import { buildSafeChildEnvironment } from "./process-environment.js";
+import { projectBrowserMcpServerConfig } from "./project-browser.js";
+import { createLunaSecretStore, type LunaSecretStore } from "./luna-secret.js";
 import {
   createCodexSdkLocalAgentRuntime,
   type LocalAgentRunInput,
   type LocalAgentRunResult,
+  type LocalAgentRuntime,
 } from "./local-agent-runtime.js";
 
 export interface LocalAgentAdapter {
@@ -20,9 +26,19 @@ export interface LocalAgentAdapter {
 export interface LocalAgentAdapterOptions {
   /** Explicit child-only environment additions for controlled integrations/tests. */
   childEnvironment?: NodeJS.ProcessEnv;
+  /** Luna key supplied by the trusted parent process over a private worker pipe. */
+  lunaApiKey?: string;
+  /** Injectable secret store for the OpenAI Luna adapter. */
+  lunaSecretStore?: LunaSecretStore;
+  /** Injectable runtime factory so Luna policy can be tested without live API calls. */
+  lunaRuntimeFactory?: (apiKey: string, workspace: string) => Promise<LocalAgentRuntime>;
 }
 
-export type AcpLocalAgentProvider = "cursor" | "copilot" | "luna";
+export type AcpLocalAgentProvider = "cursor" | "copilot" | "kimi";
+
+export const OPENAI_LUNA_MODEL = "gpt-5.6-luna";
+export const OPENAI_LUNA_DEFAULT_EFFORT = "medium";
+const OPENAI_LUNA_EFFORTS = new Set(["low", "medium", "high", "xhigh"]);
 
 const PI_AGENT_DEFAULT_TIMEOUT_MS = 120_000;
 const PI_AGENT_MIN_TIMEOUT_MS = 1_000;
@@ -55,8 +71,8 @@ export function acpCommandFor(
       return [env.CURSOR_COMMAND ?? "cursor-agent", "acp"];
     case "copilot":
       return [env.COPILOT_COMMAND ?? "copilot", "--acp"];
-    case "luna":
-      return [env.LUNA_COMMAND ?? "kimi", "acp"];
+    case "kimi":
+      return [env.KIMI_COMMAND ?? env.LUNA_COMMAND ?? "kimi", "acp"];
   }
 }
 
@@ -72,6 +88,12 @@ export function createLocalAgentAdapter(
   options: LocalAgentAdapterOptions = {},
 ): LocalAgentAdapter {
   switch (provider) {
+    case "luna":
+      return new OpenAiLunaLocalAgentAdapter(
+        options.lunaSecretStore ?? createLunaSecretStore(),
+        options.lunaRuntimeFactory ?? createOpenAiLunaRuntime,
+        options.lunaApiKey,
+      );
     case "codex":
       return new CodexLocalAgentAdapter();
     case "claude":
@@ -82,8 +104,90 @@ export function createLocalAgentAdapter(
       return new PiRpcLocalAgentAdapter();
     case "cursor":
     case "copilot":
-    case "luna":
+    case "kimi":
       return new AcpLocalAgentAdapter(provider, options.childEnvironment);
+  }
+}
+
+async function createOpenAiLunaRuntime(apiKey: string, workspace: string): Promise<LocalAgentRuntime> {
+  const safeEnv = buildSafeChildEnvironment();
+  const stateDir = process.env.DEVSPACE_STATE_DIR ?? join(homedir(), ".local", "share", "devspace");
+  const codexHome = join(stateDir, "providers", "openai-luna", "codex");
+  mkdirSync(codexHome, { recursive: true, mode: 0o700 });
+  safeEnv.CODEX_HOME = codexHome;
+
+  return createCodexSdkLocalAgentRuntime({
+    apiKey,
+    env: Object.fromEntries(
+      Object.entries(safeEnv).filter((entry): entry is [string, string] => typeof entry[1] === "string"),
+    ),
+    config: {
+      allow_login_shell: false,
+      shell_environment_policy: {
+        inherit: "core",
+        exclude: ["^(CODEX_API_KEY|OPENAI_API_KEY|DEVSPACE_OAUTH_OWNER_TOKEN)$"],
+      },
+      ...lunaProjectUiMcpConfig(workspace, stateDir),
+    },
+  });
+}
+
+export function lunaProjectUiMcpConfig(
+  workspace: string,
+  stateDir: string = process.env.DEVSPACE_STATE_DIR ?? join(homedir(), ".local", "share", "devspace"),
+  options: { playwrightMcpCliPath?: string } = {},
+): Record<string, unknown> {
+  const root = resolve(workspace);
+  const helperPath = fileURLToPath(new URL("./luna-project-tools-server.js", import.meta.url));
+  return {
+    mcp_servers: {
+      devspace_browser: projectBrowserMcpServerConfig(root, stateDir, {
+        playwrightMcpCliPath: options.playwrightMcpCliPath,
+      }),
+      devspace_xcode: {
+        command: process.execPath,
+        args: [helperPath],
+        cwd: root,
+        env: {
+          DEVSPACE_LUNA_WORKSPACE_ROOT: root,
+        },
+        startup_timeout_sec: 10,
+        tool_timeout_sec: 600,
+      },
+    },
+  };
+}
+
+class OpenAiLunaLocalAgentAdapter implements LocalAgentAdapter {
+  readonly provider = "luna" as const;
+
+  constructor(
+    private readonly secrets: LunaSecretStore,
+    private readonly runtimeFactory: (apiKey: string, workspace: string) => Promise<LocalAgentRuntime>,
+    private readonly apiKey?: string,
+  ) {}
+
+  async run(input: LocalAgentRunInput): Promise<LocalAgentRunResult> {
+    if (input.model && input.model !== OPENAI_LUNA_MODEL) {
+      throw new Error(
+        `OpenAI Luna workers are hard-locked to ${OPENAI_LUNA_MODEL}; refusing model ${input.model}.`,
+      );
+    }
+    const thinking = input.thinking ?? OPENAI_LUNA_DEFAULT_EFFORT;
+    if (!OPENAI_LUNA_EFFORTS.has(thinking)) {
+      throw new Error(
+        `Unsupported OpenAI Luna reasoning effort '${thinking}'. Use low, medium, high, or xhigh.`,
+      );
+    }
+
+    const apiKey = this.apiKey ?? this.secrets.read();
+    const runtime = await this.runtimeFactory(apiKey, input.workspace);
+    const result = await runtime.run({
+      ...input,
+      model: OPENAI_LUNA_MODEL,
+      thinking,
+    });
+    return { ...result, provider: this.provider };
   }
 }
 

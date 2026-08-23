@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import { tmpdir } from "node:os";
+import { dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   buildMacosSandboxProfile,
   wrapMacosSandboxCommand,
@@ -48,10 +50,22 @@ const providerPaths = workerSandboxReadPaths(
     devspaceAgentsDir: "/Users/example/.devspace/agents",
     sandboxReadPaths: ["/Users/example/explicit"],
   },
-  "luna",
-  { LUNA_COMMAND: "/Users/example/.kimi-code/bin/kimi" },
+  "kimi",
+  { KIMI_COMMAND: "/Users/example/.kimi-code/bin/kimi" },
 );
 assert.ok(!providerPaths.includes("/Users/example/.codex"));
 assert.ok(providerPaths.includes("/Users/example/.devspace/agents"));
 assert.ok(providerPaths.includes("/Users/example/explicit"));
 assert.ok(providerPaths.includes("/Users/example/.kimi-code/bin"));
+
+const lunaPaths = workerSandboxReadPaths(
+  {
+    devspaceAgentsDir: "/Users/example/.devspace/agents",
+    sandboxReadPaths: [],
+  },
+  "luna",
+  {},
+);
+assert.ok(lunaPaths.includes(dirname(dirname(fileURLToPath(import.meta.url)))));
+assert.ok(!lunaPaths.includes("/Users/example"));
+assert.ok(!lunaPaths.includes("/Users/example/.codex"));

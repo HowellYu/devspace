@@ -148,13 +148,30 @@ export class SingleUserOAuthProvider implements OAuthServerProvider {
     const req = res.req;
 
     if (req.method !== "POST") {
+      const requestedScopes = params.scopes ?? this.config.scopes;
+      if (this.oauthStore.hasReusableAuthorization({
+        client,
+        redirectUri: params.redirectUri,
+        scopes: requestedScopes,
+        resource: params.resource?.href,
+      })) {
+        this.oauthStore.rememberAuthorization({
+          client,
+          redirectUri: params.redirectUri,
+          scopes: requestedScopes,
+          resource: params.resource?.href,
+        });
+        this.redirectWithAuthorizationCode(client, params, res);
+        return;
+      }
+
       const nonce = randomToken();
       setCsrfNonceCookie(res, nonce, this.publicBaseUrl);
       res.status(200).setHeader("Content-Type", "text/html; charset=utf-8");
       res.send(
         formHtml({
           clientName: client.client_name ?? client.client_id,
-          scopes: params.scopes ?? this.config.scopes,
+          scopes: requestedScopes,
           resource: params.resource,
           fields: authorizationFormFields(client, params),
           csrfNonce: nonce,
@@ -213,18 +230,13 @@ export class SingleUserOAuthProvider implements OAuthServerProvider {
     }
 
     this.rateLimiter.recordSuccess(rateKey);
-
-    const code = `code-${randomUUID()}`;
-    this.codes.set(code, {
-      clientId: client.client_id,
-      params,
-      expiresAtMs: Date.now() + CODE_TTL_MS,
+    this.oauthStore.rememberAuthorization({
+      client,
+      redirectUri: params.redirectUri,
+      scopes: params.scopes ?? this.config.scopes,
+      resource: params.resource?.href,
     });
-
-    const redirectUrl = new URL(params.redirectUri);
-    redirectUrl.searchParams.set("code", code);
-    if (params.state !== undefined) redirectUrl.searchParams.set("state", params.state);
-    res.redirect(302, redirectUrl.href);
+    this.redirectWithAuthorizationCode(client, params, res);
   }
 
   async challengeForAuthorizationCode(
@@ -297,14 +309,33 @@ export class SingleUserOAuthProvider implements OAuthServerProvider {
     };
   }
 
-  async revokeToken(_client: OAuthClientInformationFull, request: OAuthTokenRevocationRequest): Promise<void> {
+  async revokeToken(client: OAuthClientInformationFull, request: OAuthTokenRevocationRequest): Promise<void> {
     const hashed = hashToken(request.token);
     this.oauthStore.deleteAccessToken(hashed);
     this.oauthStore.deleteRefreshToken(hashed);
+    this.oauthStore.forgetAuthorizationsForClient(client);
   }
 
   close(): void {
     this.oauthStore.close();
+  }
+
+  private redirectWithAuthorizationCode(
+    client: OAuthClientInformationFull,
+    params: AuthorizationParams,
+    res: Response,
+  ): void {
+    const code = `code-${randomUUID()}`;
+    this.codes.set(code, {
+      clientId: client.client_id,
+      params,
+      expiresAtMs: Date.now() + CODE_TTL_MS,
+    });
+
+    const redirectUrl = new URL(params.redirectUri);
+    redirectUrl.searchParams.set("code", code);
+    if (params.state !== undefined) redirectUrl.searchParams.set("state", params.state);
+    res.redirect(302, redirectUrl.href);
   }
 
   private validCodeRecord(

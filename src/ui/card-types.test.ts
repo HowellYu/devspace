@@ -68,23 +68,23 @@ test("show changes still opens immediately", () => {
   );
 });
 
-test("a workspace card expands when it contains provider metadata", () => {
+test("provider-only workspace metadata does not create visible details", () => {
   assert.equal(
     isExpandableCard({
       tool: "open_workspace",
       agentProviders: [{ name: "codex", available: true }],
     }),
-    true,
+    false,
   );
 });
 
-test("a workspace card with details opens immediately", () => {
+test("workspace cards stay collapsed by default", () => {
   assert.equal(
     isInitiallyExpandedCard({
       tool: "open_workspace",
-      skills: [{ name: "research" }],
+      agents: [{ name: "reviewer", provider: "codex" }],
     }),
-    true,
+    false,
   );
 });
 

@@ -17,7 +17,7 @@ import {
 } from "./local-agent-orchestrator.js";
 
 const ALL_AVAILABLE: LocalAgentProviderAvailability[] = [
-  "codex", "claude", "opencode", "pi", "cursor", "copilot", "luna",
+  "luna", "kimi", "codex", "claude", "opencode", "pi", "cursor", "copilot",
 ].map((name) => ({ name: name as LocalAgentProvider, available: true }));
 
 interface RunCapture {
@@ -176,12 +176,63 @@ test("fallback defaults on and picks the first available built-in provider", asy
   });
 
   assert.equal(fallbackUsed, true);
-  assert.equal(record.provider, "codex");
+  assert.equal(record.provider, "luna");
   assert.equal(record.fallbackEnabled, true);
   const waited = await orchestrator.wait(record.id, 5);
   assert.equal(waited.record.status, "idle");
   assert.equal(captures.length, 1);
-  assert.equal(captures[0].provider, "codex");
+  assert.equal(captures[0].provider, "luna");
+});
+
+test("OpenAI Luna falls back only to Kimi when unavailable", async (t) => {
+  const { project, config, store, captures } = await fixture(t);
+  const availability = ALL_AVAILABLE.map((entry) =>
+    entry.name === "luna" ? { name: entry.name, available: false, reason: "missing key" } : entry,
+  );
+  let orchestrator: LocalAgentOrchestrator;
+  orchestrator = createLocalAgentOrchestrator(config, store, {
+    runProvider: fakeRunProvider(captures),
+    spawnWorker: async (recordId, promptFile) => {
+      setTimeout(() => orchestrator.executeWorker(recordId, promptFile), 0);
+    },
+    refreshAvailability: () => availability,
+    checkProviderAvailability: (provider) => availability.find((entry) => entry.name === provider)!,
+  });
+
+  const { record, fallbackUsed } = await orchestrator.start({
+    workspaceRoot: project,
+    target: "luna",
+    prompt: "do work",
+  });
+  assert.equal(fallbackUsed, true);
+  assert.equal(record.provider, "kimi");
+  assert.equal((await orchestrator.wait(record.id, 5)).record.status, "idle");
+  assert.deepEqual(captures.map((capture) => capture.provider), ["kimi"]);
+});
+
+test("OpenAI Luna quota fallback cannot land on generic Codex", async (t) => {
+  const { project, config, store } = await fixture(t);
+  const captures: RunCapture[] = [];
+  const runProvider = async (provider: LocalAgentProvider, input: LocalAgentRunInput): Promise<LocalAgentRunResult> => {
+    captures.push({ provider, input });
+    if (provider === "luna") throw new Error("rate limit 429");
+    return { provider, providerSessionId: "kimi-session", finalResponse: "ok", items: [] };
+  };
+  let orchestrator: LocalAgentOrchestrator;
+  orchestrator = createLocalAgentOrchestrator(config, store, {
+    runProvider,
+    spawnWorker: async (recordId, promptFile) => {
+      setTimeout(() => orchestrator.executeWorker(recordId, promptFile), 0);
+    },
+    refreshAvailability: () => ALL_AVAILABLE,
+    checkProviderAvailability: (provider) => ({ name: provider, available: true }),
+  });
+
+  const { record } = await orchestrator.start({ workspaceRoot: project, target: "luna", prompt: "work" });
+  const waited = await orchestrator.wait(record.id, 5);
+  assert.equal(waited.record.status, "idle");
+  assert.equal(waited.record.provider, "kimi");
+  assert.deepEqual(captures.map((capture) => capture.provider), ["luna", "kimi"]);
 });
 
 test("continue refuses to start a second process for an active worker", async (t) => {
@@ -246,9 +297,9 @@ test("first-turn quota failure falls back to another available provider", async 
   });
   const waited = await orchestrator.wait(record.id, 5);
   assert.equal(waited.record.status, "idle");
-  assert.equal(waited.record.provider, "claude");
+  assert.equal(waited.record.provider, "luna");
   assert.equal(waited.record.latestResponse, "fallback-ok");
-  assert.deepEqual(captures.map((capture) => capture.provider), ["codex", "claude"]);
+  assert.deepEqual(captures.map((capture) => capture.provider), ["codex", "luna"]);
   assert.equal(captures[1].input.model, undefined);
   assert.equal(captures[1].input.thinking, undefined);
   assert.match(captures[1].input.prompt, /Review changes\.\n\nTask:\nreview it/);
@@ -305,6 +356,23 @@ test("runtime fallback does not mask non-capacity provider errors", async (t) =>
   assert.equal(waited.record.status, "error");
   assert.equal(waited.record.provider, "codex");
   assert.match(waited.record.error ?? "", /authentication denied/);
+});
+
+test("worker errors redact OpenAI API-key-shaped text before persistence", async (t) => {
+  const { project, config, store } = await fixture(t);
+  let orchestrator: LocalAgentOrchestrator;
+  orchestrator = createLocalAgentOrchestrator(config, store, {
+    runProvider: async () => { throw new Error("Incorrect API key sk-proj-secret-value"); },
+    spawnWorker: async (recordId, promptFile) => {
+      setTimeout(() => orchestrator.executeWorker(recordId, promptFile), 0);
+    },
+    refreshAvailability: () => ALL_AVAILABLE,
+    checkProviderAvailability: (provider) => ({ name: provider, available: true }),
+  });
+  const { record } = await orchestrator.start({ workspaceRoot: project, target: "reviewer", prompt: "check" });
+  const waited = await orchestrator.wait(record.id, 5);
+  assert.equal(waited.record.status, "error");
+  assert.equal(waited.record.error, "Incorrect API key [REDACTED_OPENAI_KEY]");
 });
 
 test("inspect returns status, provider, profile, and latest response", async (t) => {

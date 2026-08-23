@@ -47,6 +47,11 @@ const migrations: Migration[] = [
     name: "local-agent-fallback-enabled",
     up: migrateLocalAgentFallbackEnabled,
   },
+  {
+    version: 9,
+    name: "oauth-client-approvals",
+    up: migrateOAuthClientApprovals,
+  },
 ];
 
 export function migrateDatabase(sqlite: Database.Database): void {
@@ -240,6 +245,22 @@ function migrateLocalAgentGrantScopeRoot(sqlite: Database.Database): void {
 
 function migrateLocalAgentFallbackEnabled(sqlite: Database.Database): void {
   addColumnIfMissing(sqlite, "local_agent_sessions", "fallback_enabled", "integer not null default 0");
+}
+
+function migrateOAuthClientApprovals(sqlite: Database.Database): void {
+  sqlite.exec(`
+    create table if not exists oauth_client_approvals (
+      id integer primary key autoincrement,
+      client_name text not null,
+      redirect_origin text not null,
+      scopes_json text not null,
+      resource text,
+      approved_at integer not null
+    );
+
+    create index if not exists oauth_client_approvals_lookup_idx
+      on oauth_client_approvals(client_name, redirect_origin, resource);
+  `);
 }
 
 function addColumnIfMissing(

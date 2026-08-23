@@ -3,6 +3,8 @@ import { delimiter } from "node:path";
 import {
   claudeCommandEnvironment,
   createLocalAgentAdapter,
+  lunaProjectUiMcpConfig,
+  OPENAI_LUNA_MODEL,
   extractOpenCodeFinalResponse,
   extractPiFinalResponse,
   extractPiProviderError,
@@ -16,19 +18,117 @@ import { removeDevspaceNodeModulesBinFromPath } from "./local-agent-path.js";
 import type { LocalAgentProvider } from "./local-agent-profiles.js";
 
 const providers: LocalAgentProvider[] = [
+  "luna",
+  "kimi",
   "codex",
   "claude",
   "opencode",
   "pi",
   "cursor",
   "copilot",
-  "luna",
 ];
 
 for (const provider of providers) {
   const adapter = createLocalAgentAdapter(provider);
   assert.equal(adapter.provider, provider);
   assert.equal(typeof adapter.run, "function");
+}
+
+{
+  let readCount = 0;
+  let runtimeKey = "";
+  let runtimeWorkspace = "";
+  let runtimeInput: unknown;
+  const adapter = createLocalAgentAdapter("luna", {
+    lunaSecretStore: {
+      available: () => true,
+      read: () => { readCount += 1; return "sk-test-luna"; },
+      setInteractive: () => {},
+      delete: () => true,
+    },
+    lunaRuntimeFactory: async (apiKey, workspace) => {
+      runtimeKey = apiKey;
+      runtimeWorkspace = workspace;
+      return {
+        provider: "fake-codex-runtime",
+        run: async (input) => {
+          runtimeInput = input;
+          return {
+            provider: "fake-codex-runtime",
+            providerSessionId: "luna-session-1",
+            finalResponse: "done",
+            items: [],
+          };
+        },
+      };
+    },
+  });
+  const result = await adapter.run({
+    prompt: "implement it",
+    workspace: "/tmp/project",
+    thinking: "high",
+    writeMode: "allowed",
+  });
+  assert.equal(readCount, 1);
+  assert.equal(runtimeKey, "sk-test-luna");
+  assert.equal(runtimeWorkspace, "/tmp/project");
+  assert.deepEqual(runtimeInput, {
+    prompt: "implement it",
+    workspace: "/tmp/project",
+    thinking: "high",
+    writeMode: "allowed",
+    model: OPENAI_LUNA_MODEL,
+  });
+  assert.equal(result.provider, "luna");
+  assert.equal(result.providerSessionId, "luna-session-1");
+
+  const uiConfig = lunaProjectUiMcpConfig("/tmp/project", "/tmp/devspace-state", {
+    playwrightMcpCliPath: "/devspace/node_modules/@playwright/mcp/cli.js",
+  });
+  const mcpServers = uiConfig.mcp_servers as Record<string, Record<string, unknown>>;
+  const browser = mcpServers.devspace_browser;
+  const xcode = mcpServers.devspace_xcode;
+  assert.equal(browser.command, process.execPath);
+  assert.equal(browser.cwd, "/tmp/project");
+  assert.ok((browser.args as string[]).includes("--browser=chromium"));
+  assert.ok((browser.args as string[]).includes("--image-responses=omit"));
+  assert.doesNotMatch((browser.args as string[]).join(" "), /--extension|--cdp-endpoint|Google Chrome\.app/);
+  assert.deepEqual(browser.env, { PLAYWRIGHT_BROWSERS_PATH: "0" });
+  assert.equal(xcode.command, process.execPath);
+  assert.equal(xcode.cwd, "/tmp/project");
+  assert.deepEqual(xcode.env, { DEVSPACE_LUNA_WORKSPACE_ROOT: "/tmp/project" });
+  assert.match(String((xcode.args as string[])[0]), /luna-project-tools-server\.js$/);
+  assert.equal(mcpServers.devspace_project_ui, undefined);
+
+  await assert.rejects(
+    () => adapter.run({ prompt: "bad", workspace: "/tmp/project", model: "gpt-5.6-sol" }),
+    /hard-locked to gpt-5\.6-luna/,
+  );
+  await assert.rejects(
+    () => adapter.run({ prompt: "bad", workspace: "/tmp/project", thinking: "ultra" }),
+    /Unsupported OpenAI Luna reasoning effort/,
+  );
+}
+
+{
+  let readCount = 0;
+  let runtimeKey = "";
+  const adapter = createLocalAgentAdapter("luna", {
+    lunaApiKey: "parent-pipe-key",
+    lunaSecretStore: {
+      available: () => true,
+      read: () => { readCount += 1; return "should-not-be-read"; },
+      setInteractive: () => {},
+      delete: () => true,
+    },
+    lunaRuntimeFactory: async (apiKey, workspace) => {
+      runtimeKey = `${apiKey}:${workspace}`;
+      return { provider: "fake", run: async () => ({ provider: "fake", providerSessionId: "pipe-session", finalResponse: "done", items: [] }) };
+    },
+  });
+  await adapter.run({ prompt: "read only", workspace: "/tmp/project" });
+  assert.equal(runtimeKey, "parent-pipe-key:/tmp/project");
+  assert.equal(readCount, 0);
 }
 
 assert.deepEqual(

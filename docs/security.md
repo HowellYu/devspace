@@ -67,7 +67,7 @@ URL. Use `DEVSPACE_ALLOWED_HOSTS=*` only for intentional local debugging.
 
 ## Tunnels
 
-DevSpace does not manage tunnels. Your tunnel or reverse proxy should point to:
+DevSpace does not create or authorize tunnels. Your tunnel or reverse proxy should point to:
 
 ```text
 http://127.0.0.1:7676
@@ -76,6 +76,8 @@ http://127.0.0.1:7676
 Prefer adding Cloudflare Access, Tailscale identity controls, or equivalent
 protection in front of public tunnels. DevSpace OAuth still protects the MCP
 endpoint, but the tunnel URL should not be treated as a secret.
+
+When `DEVSPACE_PUBLIC_BASE_URL` is a `*.ts.net` Funnel URL, DevSpace may monitor and repair only the already-existing Funnel mapping for its own configured port. Public checks resolve through public DNS and connect directly to the returned Funnel ingress addresses, avoiding the false-positive same-node tailnet path. Recovery requires three consecutive failures, refuses to act when the existing mapping does not already target DevSpace, and performs a full `funnel reset` only when there is exactly one simple Funnel mapping to avoid deleting unrelated services. This behavior can be disabled with `DEVSPACE_TAILSCALE_FUNNEL_WATCH=0` and does not alter login state, ACLs, node authorization, or project filesystem grants.
 
 ## Shell Access
 
@@ -111,14 +113,17 @@ execute transferred content.
 
 ## Project Memory
 
-Project memory is stored inside the workspace at `.devspace/memory/` (for example, `<workspace>/.devspace/memory/`). It is scoped to the canonical project root and shared by checkout and worktree modes for the same project. DevSpace exposes a content-derived memory revision plus a bounded automatic bootstrap so separate ChatGPT sessions and other workspace-aware local agents can synchronize compact project state without sharing transcripts. Memory files are capped at 32 KiB, and bootstrap content is capped more aggressively for token efficiency. DevSpace creates `.devspace/.gitignore` with `memory/` so memory files are ignored from version control by default; if you already have a `.devspace/.gitignore`, add `memory/` there to keep memory local.
+Project memory is stored inside the workspace at `.devspace/memory/` (for example, `<workspace>/.devspace/memory/`). It is scoped to the canonical project root and shared by checkout and worktree modes for the same project. DevSpace exposes a content-derived memory revision plus a bounded automatic bootstrap so separate ChatGPT sessions and other workspace-aware local agents can synchronize compact project state without sharing transcripts. Memory files are capped at 32 KiB, and bootstrap content is capped more aggressively for token efficiency. In Git workspaces DevSpace hides `.devspace/` through the repository-local `.git/info/exclude`, keeping automatic memory initialization out of `git status` without changing tracked ignore files. Non-Git workspaces fall back to `.devspace/.gitignore` with `memory/`.
 
 Use memory only for durable project facts, decisions, and checkpoints. Do not store secrets, credentials, owner passwords, or transient chain-of-thought in memory files. Memory file names are validated to prevent hidden files, path separators, and traversal.
 
 ## Subagents and ACP Providers
 
 When subagents are enabled (`DEVSPACE_SUBAGENTS=1`), DevSpace can delegate tasks
-to local providers such as `luna`, `codex`, or `claude`. On macOS, DevSpace now
+to local providers. In this fork, `luna` is the default OpenAI API labor path
+and is hard-locked to `gpt-5.6-luna`; `kimi` is the Kimi Code ACP backup.
+Generic `codex` remains available for compatibility but is not part of the
+default labor fallback policy. On macOS, DevSpace now
 wraps workspace shell sessions and detached worker processes with Seatbelt
 (`sandbox-exec`) by default. The policy blocks reads under other user/volume
 paths and blocks writes globally except the current workspace, DevSpace state,
@@ -140,6 +145,13 @@ with filesystem permissions only for the intended projects and DevSpace state.
 Do not run DevSpace as root or an administrator.
 
 Review subagent output before acting on it, and keep subagent profiles narrow.
+
+### Luna project UI isolation
+
+When available in the live Luna runtime, DevSpace may inject two additional MCP servers into Luna. `devspace_browser` uses official Playwright MCP with Playwright-managed Chromium, a persistent browser profile keyed to the current workspace, and a workspace-scoped output directory under DevSpace state. It does not attach to the user's installed Chrome profile, a Chrome extension, or an existing CDP endpoint. Image responses are omitted by default, so Luna works from structured page/accessibility snapshots rather than desktop screenshots.
+
+`devspace_xcode` uses Xcode's native scripting interface. Every workspace document or file is canonicalized and checked against the active DevSpace workspace before use. If another Xcode project is active, the helper returns only an unauthorized status and does not disclose that project's path. This design does not grant generic desktop/window enumeration, mouse/keyboard automation, clipboard access, Finder/System Settings control, Screen Recording, Accessibility, or Full Disk Access. macOS may require an Automation permission specifically for controlling Xcode; that permission must not be treated as authority to automate unrelated applications.
+
 Each worker run has a separate execution deadline (600 seconds by default,
 configurable up to 7200 seconds). Overlong workers are terminated and recorded as
 `timed_out`; inspection/wait also reconcile persisted running workers against the
@@ -150,9 +162,13 @@ environment. DevSpace forwards only basic process metadata (`PATH`, home/temp,
 locale, shell/user), explicitly supported DevSpace operational variables, and
 provider executable-path overrides when needed. It does **not** implicitly
 forward `SSH_AUTH_SOCK`, cloud credentials, API keys, database URLs, or arbitrary
-parent-process environment variables. A provider that genuinely requires a
-credential must receive it through an explicit provider credential mechanism rather
-than widening the global child environment.
+parent-process environment variables. OpenAI Luna is the explicit credential
+exception: its API key is retrieved from macOS Keychain only inside the Luna
+adapter and passed to the Codex SDK. Luna uses a dedicated Codex home under
+DevSpace state instead of `~/.codex`; Codex shell-command policy excludes the
+API key and disables login shells so model-generated commands cannot inherit or
+reintroduce it. Other provider credentials must likewise use an explicit
+provider credential mechanism rather than widening the global child environment.
 
 ## Project authorization and scoped grants
 
@@ -173,6 +189,11 @@ Generic grants reject DevSpace control-plane paths, SSH/cloud credential trees,
 system directories, broad home roots, and `~/.codex`. Provider credentials are a
 separate security surface rather than an excuse to grant an entire credential
 directory. A remote MCP session cannot create, approve, or revoke path grants.
+
+The OpenAI Luna API key is managed separately with local-only
+`devspace secret set|status|delete openai-luna` and lives in macOS Keychain. It
+must not be written to project files, DevSpace config, memory, logs, or the
+LaunchAgent environment.
 
 Provider-specific configuration exceptions use the local-only `devspace
 provider-access` control plane. Entries are bound to one provider and must name

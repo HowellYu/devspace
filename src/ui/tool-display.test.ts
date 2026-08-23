@@ -143,7 +143,7 @@ assert.deepEqual(
     tool: "open_workspace",
     summary: { mode: "worktree", agentsFiles: 1, skills: 4 },
   }),
-  { kind: "text", text: "1 instruction · 4 skills" },
+  { kind: "text", text: "1 instruction" },
 );
 
 assert.deepEqual(

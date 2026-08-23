@@ -104,7 +104,7 @@ class FileProjectMemoryManager implements ProjectMemoryManager {
 
     const localNamespace = localMemoryNamespacePath(root);
     await mkdir(localNamespace, { recursive: true, mode: 0o700 });
-    await ensureDevspaceGitignore(root);
+    await ensureMemoryIgnored(root);
     await maybeMigrateGlobalMemory(memoryNamespacePath(this.stateDir, root), localNamespace);
 
     const path = join(localNamespace, file);
@@ -295,19 +295,30 @@ async function maybeMigrateGlobalMemory(globalNamespace: string, localNamespace:
   }
 }
 
-async function ensureDevspaceGitignore(root: string): Promise<void> {
+async function ensureMemoryIgnored(root: string): Promise<void> {
+  const gitDir = join(root, ".git");
+  const gitStats = await stat(gitDir).catch(() => undefined);
+  if (gitStats?.isDirectory()) {
+    const infoDir = join(gitDir, "info");
+    const excludePath = join(infoDir, "exclude");
+    await mkdir(infoDir, { recursive: true, mode: 0o700 });
+    const existing = await readFile(excludePath, "utf8").catch(() => "");
+    const rule = ".devspace/";
+    if (!existing.split(/\r?\n/).includes(rule)) {
+      const prefix = existing.length > 0 && !existing.endsWith("\n") ? "\n" : "";
+      await writeFile(excludePath, `${existing}${prefix}${rule}\n`, { mode: 0o600 });
+    }
+    return;
+  }
+
   const devspaceDir = join(root, DEVSPACE_DIR_NAME);
   const gitignorePath = join(devspaceDir, ".gitignore");
-
   try {
     await stat(gitignorePath);
     return;
   } catch (error) {
-    if (!isErrnoException(error) || error.code !== "ENOENT") {
-      throw error;
-    }
+    if (!isErrnoException(error) || error.code !== "ENOENT") throw error;
   }
-
   await writeFile(gitignorePath, "memory/\n", { mode: 0o644 });
 }
 

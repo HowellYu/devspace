@@ -9,7 +9,8 @@ const source: NodeJS.ProcessEnv = {
   SHELL: "/bin/zsh",
   USER: "test",
   LOGNAME: "test",
-  LUNA_COMMAND: "/opt/kimi",
+  KIMI_COMMAND: "/opt/kimi",
+  LUNA_COMMAND: "/opt/legacy-kimi",
   DEVSPACE_CONFIG_DIR: "/Users/test/.devspace",
   DEVSPACE_AGENTS_EXECUTION_TIMEOUT: "600",
   SSH_AUTH_SOCK: "/private/tmp/ssh.sock",
@@ -25,6 +26,7 @@ assert.equal(shellEnv.PATH, "/usr/bin:/bin");
 assert.equal(shellEnv.HOME, "/Users/test");
 assert.equal(shellEnv.DEVSPACE_CONFIG_DIR, "/Users/test/.devspace");
 assert.equal(shellEnv.DEVSPACE_AGENTS_EXECUTION_TIMEOUT, "600");
+assert.equal(shellEnv.KIMI_COMMAND, undefined);
 assert.equal(shellEnv.LUNA_COMMAND, undefined);
 assert.equal(shellEnv.SSH_AUTH_SOCK, undefined);
 assert.equal(shellEnv.OPENAI_API_KEY, undefined);
@@ -34,7 +36,8 @@ assert.equal(shellEnv.DATABASE_URL, undefined);
 assert.equal(shellEnv.RANDOM_APP_SECRET, undefined);
 
 const providerEnv = buildSafeChildEnvironment({ source, includeProviderCommands: true });
-assert.equal(providerEnv.LUNA_COMMAND, "/opt/kimi");
+assert.equal(providerEnv.KIMI_COMMAND, "/opt/kimi");
+assert.equal(providerEnv.LUNA_COMMAND, "/opt/legacy-kimi");
 assert.equal(providerEnv.OPENAI_API_KEY, undefined);
 assert.equal(providerEnv.SSH_AUTH_SOCK, undefined);
 

@@ -37,16 +37,26 @@ export function installLaunchdService(options: ServiceInstallOptions): { install
     return {
       installed: true,
       path: PLIST_FILE,
-      message: `LaunchAgent installed but not started. Load it later with: launchctl load ${PLIST_FILE}`,
+      message: `LaunchAgent installed but not started. Load it later with: launchctl bootstrap gui/$(id -u) ${PLIST_FILE}`,
+    };
+  }
+
+  const domain = `gui/${process.getuid?.() ?? "$(id -u)"}`;
+  const serviceTarget = `${domain}/${PLIST_LABEL}`;
+  if (launchdServiceIsLoaded()) {
+    return {
+      installed: true,
+      path: PLIST_FILE,
+      message: "LaunchAgent plist updated; the currently running service was left untouched. Restart it only after validating the replacement build.",
     };
   }
 
   try {
-    execFileSync("launchctl", ["load", PLIST_FILE], { encoding: "utf8", timeout: 10_000 });
-    execFileSync("launchctl", ["start", PLIST_LABEL], { encoding: "utf8", timeout: 10_000 });
+    execFileSync("launchctl", ["bootstrap", domain, PLIST_FILE], { encoding: "utf8", timeout: 10_000 });
+    execFileSync("launchctl", ["kickstart", "-k", serviceTarget], { encoding: "utf8", timeout: 10_000 });
   } catch (error) {
     const stderr = (error as { stderr?: string }).stderr?.trim();
-    return { installed: false, path: PLIST_FILE, message: stderr || "launchctl load failed" };
+    return { installed: false, path: PLIST_FILE, message: stderr || "launchctl bootstrap failed" };
   }
 
   return { installed: true, path: PLIST_FILE };
@@ -62,8 +72,7 @@ export function uninstallLaunchdService(): { removed: boolean; path: string; mes
   }
 
   try {
-    execFileSync("launchctl", ["stop", PLIST_LABEL], { encoding: "utf8", timeout: 10_000 });
-    execFileSync("launchctl", ["unload", PLIST_FILE], { encoding: "utf8", timeout: 10_000 });
+    execFileSync("launchctl", ["bootout", `gui/${process.getuid?.() ?? "$(id -u)"}/${PLIST_LABEL}`], { encoding: "utf8", timeout: 10_000 });
   } catch (error) {
     const stderr = (error as { stderr?: string }).stderr?.trim();
     if (stderr && !stderr.includes("Could not find specified service")) {
@@ -83,6 +92,21 @@ export function launchdServiceIsInstalled(): boolean {
   return process.platform === "darwin" && existsSync(PLIST_FILE);
 }
 
+export function launchdServiceIsLoaded(): boolean {
+  if (process.platform !== "darwin") return false;
+  const domain = `gui/${process.getuid?.() ?? "$(id -u)"}`;
+  try {
+    execFileSync("launchctl", ["print", `${domain}/${PLIST_LABEL}`], {
+      encoding: "utf8",
+      stdio: "ignore",
+      timeout: 10_000,
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export function printServiceHelp(): string {
   return [
     "DevSpace service (macOS)",
@@ -90,12 +114,13 @@ export function printServiceHelp(): string {
     "Usage:",
     "  devspace service install [--no-start]",
     "                             Install a LaunchAgent to start DevSpace at login",
+    "                             (never unloads an already-running DevSpace service)",
     "  devspace service uninstall Remove the LaunchAgent",
     "  devspace service status    Show whether the LaunchAgent is installed",
     "",
     "The LaunchAgent runs the resolved DevSpace CLI with `devspace serve` and logs",
     `to ${LOG_DIR}. It does not contain owner tokens or credentials. Operational env`,
-    "such as LUNA_COMMAND is preserved only when explicitly set.",
+    "such as KIMI_COMMAND is preserved only when explicitly set (LUNA_COMMAND remains a legacy alias).",
     "",
     "Tailscale Funnel exposes the server to the public internet; Tailscale Serve is",
     "tailnet-only. Start whichever tunnel you need separately from DevSpace.",
@@ -114,6 +139,7 @@ export function buildServiceEnvironment(options: ServiceInstallOptions): Record<
   // Preserve only explicitly-configured operational env that is safe to embed.
   // Never copy owner tokens, secrets, or general process env.
   for (const key of [
+    "KIMI_COMMAND",
     "LUNA_COMMAND",
     "CURSOR_COMMAND",
     "COPILOT_COMMAND",
@@ -121,6 +147,9 @@ export function buildServiceEnvironment(options: ServiceInstallOptions): Record<
     "DEVSPACE_AGENTS_MAX_CONCURRENT",
     "DEVSPACE_AGENTS_WAIT_TIMEOUT",
     "DEVSPACE_AGENTS_EXECUTION_TIMEOUT",
+    "DEVSPACE_TRUST_PROXY",
+    "DEVSPACE_TAILSCALE_FUNNEL_WATCH",
+    "DEVSPACE_TAILSCALE_CLI",
   ]) {
     const value = options.env?.[key] ?? process.env[key];
     if (value) env[key] = value;
@@ -148,12 +177,9 @@ export function renderLaunchdPlist(cliPath: string, env: Record<string, string>)
     <key>RunAtLoad</key>
     <true/>
     <key>KeepAlive</key>
-    <dict>
-      <key>SuccessfulExit</key>
-      <false/>
-      <key>ThrottleInterval</key>
-      <integer>60</integer>
-    </dict>
+    <true/>
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
     <key>StandardOutPath</key>
     <string>${escapeXml(join(LOG_DIR, "devspace.log"))}</string>
     <key>StandardErrorPath</key>

@@ -39,6 +39,8 @@ npx @waishnav/devspace service uninstall  # macOS only
 | `PORT` | Local port. Defaults to `7676`. |
 | `DEVSPACE_ALLOWED_ROOTS` | Comma-separated local roots that workspaces may open. |
 | `DEVSPACE_PUBLIC_BASE_URL` | Public origin for the server, without `/mcp`. |
+| `DEVSPACE_TAILSCALE_FUNNEL_WATCH` | For `*.ts.net` public URLs, defaults to enabled. DevSpace probes the actual public Funnel ingress (not the local tailnet route) and conservatively reasserts the existing DevSpace-only mapping after repeated failures. Set `0` to disable. |
+| `DEVSPACE_TAILSCALE_CLI` | Optional Tailscale CLI override. On macOS DevSpace prefers the CLI bundled with the running `/Applications/Tailscale.app` so CLI/daemon builds stay aligned. |
 | `DEVSPACE_ALLOWED_HOSTS` | Optional Host header allowlist override. |
 | `DEVSPACE_OAUTH_OWNER_TOKEN` | Owner password for OAuth approval. Must be at least 16 characters. |
 | `DEVSPACE_WORKTREE_ROOT` | Directory for managed Git worktrees. Defaults to `~/.devspace/worktrees`. |
@@ -116,7 +118,7 @@ for the supported connector shape and security boundaries.
 
 ## OAuth
 
-DevSpace uses a single-user OAuth approval flow.
+DevSpace uses a single-user OAuth approval flow. The first connection still requires the Owner password. After a successful ChatGPT approval, DevSpace persists that owner decision separately from access and refresh tokens. Later ChatGPT dynamic-client registrations on `https://chatgpt.com` can therefore complete authorization silently without asking for the Owner password again, provided the requested scopes and MCP resource are unchanged. Explicit token revocation clears the remembered ChatGPT approval. Tool calls themselves continue to require bearer authentication.
 
 | Variable | Default |
 | --- | --- |
@@ -125,11 +127,14 @@ DevSpace uses a single-user OAuth approval flow.
 | `DEVSPACE_OAUTH_SCOPES` | `devspace` |
 | `DEVSPACE_OAUTH_ALLOWED_REDIRECT_HOSTS` | `chatgpt.com,localhost,127.0.0.1` |
 
-MCP clients discover metadata from:
+MCP clients can discover protected-resource metadata from the RFC-style root route and the legacy path-aware aliases:
 
 ```text
+/.well-known/oauth-protected-resource
 /.well-known/oauth-protected-resource/mcp
+/mcp/.well-known/oauth-protected-resource
 /.well-known/oauth-authorization-server
+/.well-known/openid-configuration
 ```
 
 ## Tool Modes
@@ -207,7 +212,8 @@ them into one of the active profile directories before use.
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `LUNA_COMMAND` | `kimi` | Executable for the `luna` ACP provider; DevSpace runs `<command> acp`. |
+| `KIMI_COMMAND` | `kimi` | Executable for the backup `kimi` ACP provider; DevSpace runs `<command> acp`. |
+| `LUNA_COMMAND` | unset | Legacy alias for `KIMI_COMMAND`; retained for existing installations only. |
 | `CURSOR_COMMAND` | `cursor-agent` | Executable for the `cursor` ACP provider. |
 | `COPILOT_COMMAND` | `copilot` | Executable for the `copilot` ACP provider. |
 | `DEVSPACE_AGENTS_WAIT_TIMEOUT` | `300` | Default `devspace agents wait` timeout in seconds (`1`-`3600`). This only controls how long the caller waits. |
@@ -219,7 +225,31 @@ them into one of the active profile directories before use.
 | `DEVSPACE_SANDBOX_READ_PATHS` | empty | Comma-separated extra read-only paths explicitly granted to sandboxed processes. |
 | `DEVSPACE_SANDBOX_WRITE_PATHS` | empty | Comma-separated extra writable paths explicitly granted to sandboxed processes. |
 
-ACP providers (`cursor`, `copilot`, `luna`) resume stored provider sessions on
+### OpenAI Luna API key
+
+The `luna` provider is the default API-backed labor provider. It uses the
+OpenAI Codex SDK and is hard-locked to `gpt-5.6-luna`; profile/model overrides
+cannot switch it to Sol, Terra, or another OpenAI model. Reasoning effort may be
+selected per run (`low`, `medium`, `high`, `xhigh`) and defaults to
+`medium`.
+
+On macOS, configure the key locally with:
+
+```bash
+devspace secret set openai-luna
+```
+
+The command delegates secret entry to the native `security` Keychain prompt. The Keychain item uses service/name `devspace` and account `OPENAI_DEVSPACE_KEY`, so recovery sessions can identify the credential without reading its value.
+The key is not included in shell history, command-line arguments, DevSpace
+configuration, LaunchAgent files, workspace memory, or workspace child
+environments. Check or remove it with:
+
+```bash
+devspace secret status openai-luna
+devspace secret delete openai-luna
+```
+
+ACP providers (`cursor`, `copilot`, `kimi`) resume stored provider sessions on
 follow-up runs through `session/load`. A failed load aborts the run rather
 than silently starting a new conversation.
 
@@ -238,8 +268,9 @@ devspace provider-access remove provider_0123456789
 ```
 
 Provider access is not exposed through MCP. Each provider is restricted to its
-own configuration root (for example Codex under `~/.codex` or Luna under
-`~/.kimi-code`), and the root itself cannot be granted wholesale. Prefer
+own configuration root (for example Codex under `~/.codex` or Kimi under
+`~/.kimi-code`). OpenAI Luna does not use this file-grant surface: its API key is
+stored separately in macOS Keychain, and the root itself cannot be granted wholesale. Prefer
 read-only entries and grant secret-bearing files only when that provider cannot
 operate without them.
 
@@ -282,10 +313,19 @@ LaunchAgent runs:
 Logs are written to `~/.devspace/logs`.
 
 The generated LaunchAgent does **not** contain your Owner password or any
-credentials. Operational environment variables such as `LUNA_COMMAND` are only
-included if they are explicitly set when you run `devspace service install`.
+credentials. Operational environment variables such as `KIMI_COMMAND` (and the
+legacy `LUNA_COMMAND` alias) are only included if explicitly set when you run
+`devspace service install`. The OpenAI Luna API key is never written to the
+LaunchAgent; DevSpace retrieves it from macOS Keychain at worker run time.
 DevSpace reads the Owner password from `~/.devspace/auth.json` at runtime, so
 keep that file readable only by your user.
+
+The agent is loaded with launchd's `RunAtLoad` and `KeepAlive` settings, so it
+starts after login/reboot and is restarted after an unexpected or clean exit.
+Re-running `devspace service install` replaces and immediately restarts the
+loaded job. If DevSpace is behind a trusted reverse proxy such as Tailscale
+Serve or Funnel, set `DEVSPACE_TRUST_PROXY=1` when installing so forwarded
+client-address headers are handled correctly.
 
 To install the LaunchAgent without immediately starting it — for example, when
 a foreground DevSpace server is already running on port 7676 — pass
@@ -295,11 +335,11 @@ a foreground DevSpace server is already running on port 7676 — pass
 npx @waishnav/devspace service install --no-start
 ```
 
-This writes and validates the plist, but skips `launchctl load` and
-`launchctl start`. Load it later with:
+This writes and validates the plist, but skips `launchctl bootstrap` and
+`launchctl kickstart`. Load it later with:
 
 ```bash
-launchctl load ~/Library/LaunchAgents/dev.devspace.agent.plist
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/dev.devspace.agent.plist
 ```
 
 To remove the service:

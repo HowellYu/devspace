@@ -14,14 +14,19 @@ being used.
 
 ## Native MCP worker tools
 
-Prefer the native MCP worker tools when the host supports them. Use the
-`devspace agents` CLI only as a fallback or for debugging.
+Prefer the native MCP worker tools when the host supports them. ChatGPT can
+freeze a custom app's action list at publication, so an older published DevSpace
+app may expose `bash` but not the newer worker tools even though the running
+server supports subagents. In that case use the sandbox-safe worker bridge
+through the existing DevSpace `bash` action; do not run the ordinary local
+`devspace agents` CLI from the workspace shell because the shell sandbox
+intentionally cannot read DevSpace's private config/state directories.
 
 - `start_worker({ workspaceId, target, prompt, fallback?, executionTimeoutSeconds? })` — start a worker
   and get a `workerId`. Target is a profile name from `open_workspace`, a
   built-in provider name, or an existing worker id to resume. Fallback defaults
   to enabled: DevSpace may select another available provider when the requested
-  provider is unavailable and, on a first turn only, for recoverable quota/rate-limit/capacity failures. Existing provider sessions are never silently moved across providers. Worker runtime defaults to 600 seconds. Keep that
+  provider is unavailable and, on a first turn only, for recoverable quota/rate-limit/capacity failures. The default labor policy uses OpenAI `luna` (`gpt-5.6-luna` only) with `kimi` (Kimi Code ACP) as its automatic backup; Luna/Kimi fallback must never silently land on generic Codex/Sol/Terra. Existing provider sessions are never silently moved across providers. Worker runtime defaults to 600 seconds. Keep that
   default for normal work; raise it only when the task is known to require
   longer-running builds, tests, or other shell execution.
 - `wait_worker({ workspaceId, workerId, timeoutSeconds? })` — block until the
@@ -40,9 +45,31 @@ Prefer the native MCP worker tools when the host supports them. Use the
 - `stop_worker({ workspaceId, workerId })` — best-effort stop a running or
   starting worker.
 
-## Core commands
+## Published-app worker bridge
 
-Use the CLI commands below only when the native MCP tools are not available:
+When the host does not expose native worker actions but still exposes DevSpace
+`bash`, send one of these exact command strings through the `bash` tool. The
+JSON payload is parsed by DevSpace before any shell is spawned, so it does not
+receive shell interpretation and does not grant the workspace shell access to
+DevSpace control-plane state.
+
+```text
+devspace agents bridge {"op":"start","target":"luna-worker","prompt":"<self-contained prompt>","thinking":"low"}
+devspace agents bridge {"op":"wait","workerId":"<id>","timeoutSeconds":300}
+devspace agents bridge {"op":"inspect","workerId":"<id>"}
+devspace agents bridge {"op":"continue","workerId":"<id>","prompt":"<follow-up>"}
+devspace agents bridge {"op":"stop","workerId":"<id>"}
+```
+
+The start request also accepts optional `model`, `fallback`, and
+`executionTimeoutSeconds`; continuation accepts optional `model`, `thinking`,
+and `executionTimeoutSeconds`. Use the same serialized worker → wait → review
+loop as with native tools.
+
+## Local terminal commands
+
+The ordinary CLI remains useful from a trusted local terminal or for debugging,
+but is not the remote workspace-shell fallback:
 
 ```bash
 devspace agents ls
@@ -79,9 +106,12 @@ do not remain `running` indefinitely.
 debugging. If the agent is still running, `show` returns the current status;
 prefer `wait` when you actually want the result.
 
-Do not run provider CLIs such as `codex`, `claude`, `opencode`, `pi`,
+When supported by the live Luna runtime, DevSpace injects two additional project-scoped MCP servers into Luna: `devspace_browser` uses official Playwright MCP with a separate Playwright-managed Chromium profile for the current workspace, while `devspace_xcode` exposes Xcode-native operations and optional text-only accessibility-element actions for the front Xcode window after the active project is revalidated inside that workspace. Neither capability is generic desktop control. Do not ask Luna to access the user's normal Chrome session, other Xcode projects, the desktop, other-app windows, screen pixels, coordinate mouse control, generic keyboard input, clipboard, Finder, or System Settings. `xcode_ui_*` may require macOS Accessibility, but that permission must not be treated as authority over other apps. Treat project-UI availability as a live runtime fact and escalate rather than widening scope when a task needs more authority.
+
+Do not run provider CLIs such as `codex`, `claude`, `opencode`, `pi`, `kimi`,
 `cursor-agent`, or `copilot` directly unless you are explicitly debugging
-DevSpace agent integration.
+DevSpace agent integration. OpenAI Luna is invoked through the Codex SDK with a
+Keychain-backed API key, not through an inherited `OPENAI_API_KEY` environment variable.
 
 ## Diagnostics and security
 
@@ -97,10 +127,14 @@ API keys, cloud credentials, database URLs, or `SSH_AUTH_SOCK` from DevSpace.
 Extra filesystem paths must be explicit through the local control-plane grant
 surface; do not broaden them silently. `devspace access add/remove/list` manages
 whole authorized project roots, while `devspace grants add/remove/list` manages
-scoped `read`/`readwrite` extra paths for one canonical project. Provider config
-exceptions are separate: `devspace provider-access add/remove/list` can grant one
-provider a narrow file or subdirectory inside that provider's own configuration
-tree, and the provider root itself cannot be granted wholesale. Prefer read-only
+scoped `read`/`readwrite` extra paths for one canonical project. OpenAI Luna
+credentials use a separate Keychain path: configure them locally with
+`devspace secret set openai-luna`; the API key must never be written to repo
+files, DevSpace config, workspace memory, LaunchAgent environment, or normal
+workspace child environments. Provider config exceptions are separate:
+`devspace provider-access add/remove/list` can grant one provider a narrow file
+or subdirectory inside that provider's own configuration tree, and the provider
+root itself cannot be granted wholesale. Prefer read-only
 provider entries and treat secret-bearing auth/token files as explicit user-owned
 credential decisions. These mutation surfaces are deliberately not MCP tools: if
 a worker needs a new path or provider credential file, report the exact path and
@@ -125,11 +159,12 @@ devspace agents run <profile-or-provider> --model <model> "<prompt>"
 devspace agents run <profile-or-provider> --thinking <level> "<prompt>"
 ```
 
-Use `--thinking` only when the user asks for a specific reasoning depth or when
-the task clearly needs a different effort than the configured profile default.
-Thinking values are provider-specific passthrough values. Use names supported by
-the selected local agent harness; DevSpace does not translate values between
-providers.
+Use `--thinking` when the supervising brain determines the bounded task needs a
+different effort than the profile default. For OpenAI Luna use `low`, `medium`,
+`high`, or `xhigh`; prefer the lowest effort that fits the task. The
+`luna` provider is hard-locked to `gpt-5.6-luna`, so do not use `--model` to try
+to select Sol, Terra, or another OpenAI model. Other thinking values remain
+provider-specific passthrough values.
 
 Good delegation targets:
 
@@ -210,9 +245,10 @@ Memory is stored inside the workspace at `.devspace/memory/` (for example,
 project memory exists, DevSpace initializes compact `context.md`, `progress.md`,
 and `next-steps.md` files automatically. Treat this as mandatory workspace
 initialization: every future workspace should have a usable project-memory
-baseline without waiting for the user to ask. DevSpace creates `.devspace/.gitignore` with
-`memory/` so memory files are not committed by default; if you already have a
-`.devspace/.gitignore`, add `memory/` to keep memory local. It persists across
+baseline without waiting for the user to ask. In Git workspaces DevSpace hides `.devspace/`
+through the repository-local `.git/info/exclude`, so initialization does not dirty
+`git status` or require a tracked ignore file. Non-Git workspaces fall back to a
+local `.devspace/.gitignore` containing `memory/`. It persists across
 sessions for the same canonical project root. Use it only for durable project
 facts, decisions, and checkpoints; do not store secrets or transient
 chain-of-thought there. Automatically update `progress.md` and `next-steps.md`

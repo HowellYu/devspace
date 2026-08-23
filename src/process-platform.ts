@@ -29,8 +29,7 @@ const defaultProcessTreeRuntime: ProcessTreeRuntime = {
   },
 };
 
-const LOGIN_SHELLS = new Set(["bash", "ksh", "zsh"]);
-const POSIX_SHELLS = new Set(["ash", "dash", "sh"]);
+const POSIX_SHELLS = new Set(["ash", "dash", "ksh", "sh"]);
 
 export function resolveShellCommand(
   command: string,
@@ -46,8 +45,11 @@ export function resolveShellCommand(
 
   const configuredShell = environment.SHELL;
   const shellName = configuredShell ? basename(configuredShell) : "";
-  if (configuredShell && LOGIN_SHELLS.has(shellName)) {
-    return { executable: configuredShell, args: ["-lc", command] };
+  if (configuredShell && shellName === "zsh") {
+    return { executable: configuredShell, args: ["-f", "-c", command] };
+  }
+  if (configuredShell && shellName === "bash") {
+    return { executable: configuredShell, args: ["--noprofile", "--norc", "-c", command] };
   }
   if (configuredShell && POSIX_SHELLS.has(shellName)) {
     return { executable: configuredShell, args: ["-c", command] };

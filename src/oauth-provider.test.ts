@@ -164,6 +164,55 @@ test("POST authorize with valid token, origin, and nonce redirects with code", a
   });
 });
 
+test("GET authorize silently reuses an existing approved ChatGPT connector", async () => {
+  await withProvider(async (provider) => {
+    const registration = {
+      redirect_uris: [redirectUri],
+      grant_types: ["authorization_code", "refresh_token"],
+      response_types: ["code"],
+      token_endpoint_auth_method: "none",
+      client_name: "ChatGPT",
+    };
+    const firstClient = await provider.clientsStore.registerClient!(registration);
+
+    const firstGet = makeResponse({});
+    await provider.authorize(firstClient, params, firstGet);
+    const nonce = extractCookieNonce(firstGet.sentHeaders["Set-Cookie"]);
+    assert.ok(nonce);
+
+    const firstPost = makeResponse({
+      method: "POST",
+      body: { owner_token: ownerToken, devspace_auth_nonce: nonce },
+      headers: {
+        cookie: `devspace_auth_nonce=${nonce}`,
+        origin: mcpUrl.origin,
+      },
+      ip: "1.2.3.4",
+    });
+    await provider.authorize(firstClient, params, firstPost);
+    const firstCode = new URL(firstPost.redirectUrl ?? "").searchParams.get("code");
+    assert.ok(firstCode);
+    await provider.exchangeAuthorizationCode(firstClient, firstCode, undefined, redirectUri, mcpUrl);
+
+    const replacementRedirectUri = "https://chatgpt.com/connector/oauth/replacement";
+    const replacementClient = await provider.clientsStore.registerClient!({
+      ...registration,
+      redirect_uris: [replacementRedirectUri],
+    });
+    assert.notEqual(replacementClient.client_id, firstClient.client_id);
+
+    const reconnectGet = makeResponse({});
+    await provider.authorize(
+      replacementClient,
+      { ...params, redirectUri: replacementRedirectUri },
+      reconnectGet,
+    );
+    assert.equal(reconnectGet.statusCode, 302);
+    assert.ok(reconnectGet.redirectUrl?.includes("code="));
+    assert.equal(reconnectGet.sentBody, undefined);
+  });
+});
+
 test("POST authorize rejects mismatched or missing CSRF nonce", async () => {
   await withProvider(async (provider) => {
     const res = makeResponse({

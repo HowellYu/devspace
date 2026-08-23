@@ -143,9 +143,13 @@ and reviews; workers run the local edit-test-fix loop.
 
 1. Open the workspace and write a self-contained worker prompt (goal, context,
    relevant files, acceptance criteria, rules).
-2. Start a worker: `devspace agents run luna-worker "<prompt>"`. Normal runs
-   use a 600-second execution deadline. Use `--max-runtime <seconds>` only when
-   the task is known to need longer-running builds, tests, or shell commands.
+2. Start a worker: `devspace agents run luna-worker "<prompt>"`. `luna-worker`
+   is the default OpenAI API labor profile and is hard-locked to
+   `gpt-5.6-luna`. The supervising brain chooses reasoning effort per bounded
+   task (`low` for straightforward work, `medium` for normal implementation,
+   `high` for difficult multi-file work, `xhigh` only when justified). Normal
+   runs use a 600-second execution deadline. Use `--max-runtime <seconds>` only
+   when the task is known to need longer-running builds, tests, or shell commands.
 3. Wait once: `devspace agents wait <id> --timeout 300`. Do not poll
    `agents show` in a loop. The wait timeout only controls how long the caller
    waits; the separate execution deadline stops overlong workers and records
@@ -154,9 +158,10 @@ and reviews; workers run the local edit-test-fix loop.
    `DEVSPACE_WIDGETS=changes`) rather than rereading the repository.
 5. Send corrections as a follow-up to the same session:
    `devspace agents run <id> "<review findings>"`. The worker keeps its current
-   execution deadline unless `--max-runtime` is explicitly changed. ACP providers (`cursor`,
-   `copilot`, `luna`) resume the stored provider conversation through
-   `session/load`. If the provider cannot load the previous session, the run
+   execution deadline unless `--max-runtime` is explicitly changed. OpenAI Luna
+   resumes its Codex SDK thread from a DevSpace-controlled Codex home. ACP
+   providers (`cursor`, `copilot`, `kimi`) resume the stored provider
+   conversation through `session/load`. If the provider cannot load the previous session, the run
    fails instead of silently starting over.
 
 Security posture for workers:
@@ -172,6 +177,12 @@ Security posture for workers:
   processes inherit the parent sandbox permissions.
 - Profiles such as `luna-explorer` remain instruction-level read-only; the OS
   sandbox constrains paths but does not make the profile semantically read-only.
+- OpenAI Luna API credentials live in macOS Keychain. The provider process gets
+  the key only for authentication; Codex shell-command environment policy
+  excludes the key and disables login shells so workspace commands cannot
+  inherit or reintroduce it.
+- Automatic labor fallback is Luna ↔ Kimi only. Do not silently fall through to
+  generic Codex/Sol/Terra or another larger OpenAI worker model.
 - Use worktrees for workflow isolation between parallel workers, not as a
   security boundary.
 
@@ -196,10 +207,7 @@ existing subagent sessions for that workspace.
 DevSpace keeps a small durable project memory store scoped to each canonical
 project root. It lives inside the workspace at `.devspace/memory/` (for
 example, `<workspace>/.devspace/memory/`), so it survives server restarts and
-new ChatGPT sessions for the same project can read it. DevSpace creates
-`.devspace/.gitignore` with `memory/` so memory files are not committed by
-default; if you already have a `.devspace/.gitignore`, add `memory/` to keep
-memory local.
+new ChatGPT sessions for the same project can read it. For Git workspaces, DevSpace hides `.devspace/` through the repository-local `.git/info/exclude`, so automatic memory initialization does not dirty `git status` or require a committed ignore file. For non-Git workspaces it falls back to a local `.devspace/.gitignore` containing `memory/`.
 
 Use these tools to access memory:
 

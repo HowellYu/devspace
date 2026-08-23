@@ -90,6 +90,25 @@ export const oauthRefreshTokens = sqliteTable(
   },
 );
 
+export const oauthClientApprovals = sqliteTable(
+  "oauth_client_approvals",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    clientName: text("client_name").notNull(),
+    redirectOrigin: text("redirect_origin").notNull(),
+    scopesJson: text("scopes_json").notNull(),
+    resource: text("resource"),
+    approvedAt: integer("approved_at").notNull(),
+  },
+  (table) => [
+    index("oauth_client_approvals_lookup_idx").on(
+      table.clientName,
+      table.redirectOrigin,
+      table.resource,
+    ),
+  ],
+);
+
 export const localAgentSessions = sqliteTable(
   "local_agent_sessions",
   {

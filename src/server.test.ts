@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import test, { type TestContext } from "node:test";
 import { promisify } from "node:util";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -547,6 +547,79 @@ test("start_worker returns a worker id and structured status", async (t) => {
   assert.equal(structured.executionTimeoutSeconds, 600);
   assert.equal(structured.fallbackUsed, false);
   assert.ok((structured.result as string).includes(structured.workerId as string));
+});
+
+test("bash worker bridge starts and waits without exposing DevSpace state to the shell", async (t) => {
+  const context = await fixture(t);
+  const openResult = structuredContent(await callOpen(context.client, context.project, "chat-bridge"));
+  const workspaceId = openResult.workspaceId as string;
+
+  const startCommand = `devspace agents bridge ${JSON.stringify({
+    op: "start",
+    target: "reviewer",
+    prompt: "check changes",
+    thinking: "low",
+  })}`;
+  const startedResult = await callTool(context.client, "bash", {
+    workspaceId,
+    command: startCommand,
+  });
+  const started = JSON.parse(responseText(startedResult)) as Record<string, unknown>;
+  assert.match(started.workerId as string, /^agt_fake_/);
+  assert.equal(started.status, "starting");
+  assert.equal(started.profile, "reviewer");
+  assert.equal(started.thinking, "low");
+
+  const waitedResult = await callTool(context.client, "bash", {
+    workspaceId,
+    command: `devspace agents bridge ${JSON.stringify({
+      op: "wait",
+      workerId: started.workerId,
+      timeoutSeconds: 30,
+    })}`,
+  });
+  const waited = JSON.parse(responseText(waitedResult)) as Record<string, unknown>;
+  assert.equal(waited.workerId, started.workerId);
+  assert.equal(waited.status, "idle");
+  assert.equal(waited.latestResponse, "fake response");
+  assert.equal(waited.timedOut, false);
+});
+
+test("worker lifecycle is bound to the workspace that started it", async (t) => {
+  const context = await fixture(t);
+  const otherProject = join(dirname(context.project), "other-project");
+  await mkdir(otherProject, { recursive: true });
+  const firstWorkspaceId = structuredContent(
+    await callOpen(context.client, context.project, "chat-owner"),
+  ).workspaceId as string;
+  const otherWorkspaceId = structuredContent(
+    await callOpen(context.client, otherProject, "chat-other"),
+  ).workspaceId as string;
+
+  const started = structuredContent(await callTool(context.client, "start_worker", {
+    workspaceId: firstWorkspaceId,
+    target: "reviewer",
+    prompt: "check changes",
+  }));
+
+  const bridgeResult = await callTool(context.client, "bash", {
+    workspaceId: otherWorkspaceId,
+    command: `devspace agents bridge ${JSON.stringify({
+      op: "wait",
+      workerId: started.workerId,
+      timeoutSeconds: 1,
+    })}`,
+  });
+  assert.equal(bridgeResult.isError, true);
+  assert.match(responseText(bridgeResult), /different workspace/);
+
+  const nativeResult = await callTool(context.client, "continue_worker", {
+    workspaceId: otherWorkspaceId,
+    workerId: started.workerId,
+    prompt: "should not run",
+  });
+  assert.equal(nativeResult.isError, true);
+  assert.match(responseText(nativeResult), /different workspace/);
 });
 
 test("wait_worker returns latest response and timedOut flag", async (t) => {

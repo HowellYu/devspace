@@ -8,7 +8,12 @@ assert.deepEqual(resolveShellCommand("echo ok", "win32", { ComSpec: "C:\\Windows
 
 assert.deepEqual(resolveShellCommand("echo ok", "darwin", { SHELL: "/bin/zsh" }), {
   executable: "/bin/zsh",
-  args: ["-lc", "echo ok"],
+  args: ["-f", "-c", "echo ok"],
+});
+
+assert.deepEqual(resolveShellCommand("echo ok", "darwin", { SHELL: "/bin/bash" }), {
+  executable: "/bin/bash",
+  args: ["--noprofile", "--norc", "-c", "echo ok"],
 });
 
 assert.deepEqual(resolveShellCommand("echo ok", "linux", { SHELL: "/bin/dash" }), {

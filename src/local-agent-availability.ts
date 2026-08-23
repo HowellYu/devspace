@@ -2,6 +2,7 @@ import { spawnSync } from "node:child_process";
 import { delimiter, resolve } from "node:path";
 import { acpCommandFor } from "./local-agent-adapters.js";
 import { removeDevspaceNodeModulesBinFromPath } from "./local-agent-path.js";
+import { createLunaSecretStore } from "./luna-secret.js";
 import {
   LOCAL_AGENT_PROVIDERS,
   type LocalAgentProvider,
@@ -81,6 +82,16 @@ export function checkLocalAgentProviderAvailability(
   env: NodeJS.ProcessEnv = process.env,
 ): LocalAgentProviderAvailability {
   switch (provider) {
+    case "luna": {
+      const sdk = packageAvailability(provider, "@openai/codex-sdk");
+      if (!sdk.available) return sdk;
+      if (process.platform !== "darwin") {
+        return { name: provider, available: false, reason: "OpenAI Luna Keychain storage is currently supported on macOS only" };
+      }
+      return createLunaSecretStore().available()
+        ? { name: provider, available: true }
+        : { name: provider, available: false, reason: "API key missing; run `devspace secret set openai-luna` locally" };
+    }
     case "codex":
       return packageAvailability(provider, "@openai/codex-sdk");
     case "claude":
@@ -93,7 +104,7 @@ export function checkLocalAgentProviderAvailability(
       });
     case "cursor":
     case "copilot":
-    case "luna":
+    case "kimi":
       return commandAvailability(provider, acpCommandFor(provider, env)[0], { env });
   }
 }

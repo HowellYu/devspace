@@ -257,13 +257,16 @@ test("writing migrates existing global memory into local namespace", async (t) =
   await cleanup();
 });
 
-test("creates .devspace/.gitignore on first write if absent", async (t) => {
+test("git workspaces hide automatic memory through local info/exclude", async (t) => {
   const { manager, root, cleanup } = await fixture(t);
+  const { mkdirSync } = await import("node:fs");
+  mkdirSync(join(root, ".git", "info"), { recursive: true });
 
   await manager.writeFile(root, "decisions.md", "decision\n");
 
-  const gitignore = await readFile(join(root, ".devspace", ".gitignore"), "utf8");
-  assert.equal(gitignore, "memory/\n");
+  const exclude = await readFile(join(root, ".git", "info", "exclude"), "utf8");
+  assert.equal(exclude, ".devspace/\n");
+  await assert.rejects(readFile(join(root, ".devspace", ".gitignore"), "utf8"), /ENOENT/);
 
   await cleanup();
 });

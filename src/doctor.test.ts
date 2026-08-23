@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { formatDoctorReport, runDoctorDiagnostics, nodeVersionStatus, checkSqliteNative, pathsReferToSameFile } from "./doctor.js";
+import { assessTailscaleFunnelState, formatDoctorReport, runDoctorDiagnostics, nodeVersionStatus, checkSqliteNative, pathsReferToSameFile } from "./doctor.js";
 
 test("nodeVersionStatus reports supported or unsupported", () => {
   const status = nodeVersionStatus();
@@ -29,28 +29,71 @@ test("pathsReferToSameFile resolves symlink chains before comparing", () => {
 });
 
 test("runDoctorDiagnostics returns report without credentials", async () => {
-  const report = await runDoctorDiagnostics({
-    host: "127.0.0.1",
-    port: 17676,
-    publicBaseUrl: "http://127.0.0.1:17676",
-    allowedRoots: [process.cwd()],
-    allowedHosts: ["localhost"],
-    subagents: false,
+  const configDir = mkdtempSync(join(tmpdir(), "devspace-doctor-config-"));
+  try {
+    const report = await runDoctorDiagnostics({
+      host: "127.0.0.1",
+      port: 17676,
+      publicBaseUrl: "http://127.0.0.1:17676",
+      allowedRoots: [process.cwd()],
+      allowedHosts: ["localhost"],
+      subagents: false,
+    }, {
+      ...process.env,
+      DEVSPACE_CONFIG_DIR: configDir,
+    });
+
+    assert.equal(report.nodeVersion, process.version);
+    assert.equal(report.platform, `${process.platform} ${process.arch}`);
+    assert.equal(report.sqliteNativeStatus, "ok");
+    assert.equal(report.allowedRoots[0], process.cwd());
+    assert.equal(report.localMcpUrl, "http://127.0.0.1:17676/mcp");
+    assert.equal(report.publicMcpUrl, "http://127.0.0.1:17676/mcp");
+    assert.equal(report.localHealth?.ok, false);
+    assert.equal(report.publicHealth?.skipped, true);
+    assert.equal(report.cliVersion.length > 0, true);
+    // Never include the owner token or auth file contents.
+    const serialized = JSON.stringify(report);
+    assert.doesNotMatch(serialized, /ownerToken/);
+    assert.doesNotMatch(serialized, /DEVSPACE_OAUTH_OWNER_TOKEN/);
+  } finally {
+    rmSync(configDir, { recursive: true, force: true });
+  }
+});
+
+test("assessTailscaleFunnelState detects the active public host and stale Funnel hosts", () => {
+  const statusJson = JSON.stringify({ Self: { DNSName: "qianhaos-mac-studio.tail35a51e.ts.net." } });
+  const funnelJson = JSON.stringify({
+    Web: {
+      "qianhaos-mac-studio.tail35a51e.ts.net:443": {},
+      "qianhaos-mac-studio-1.tail35a51e.ts.net:443": {},
+    },
+    AllowFunnel: {
+      "qianhaos-mac-studio.tail35a51e.ts.net:443": true,
+      "qianhaos-mac-studio-1.tail35a51e.ts.net:443": true,
+    },
   });
 
-  assert.equal(report.nodeVersion, process.version);
-  assert.equal(report.platform, `${process.platform} ${process.arch}`);
-  assert.equal(report.sqliteNativeStatus, "ok");
-  assert.equal(report.allowedRoots[0], process.cwd());
-  assert.equal(report.localMcpUrl, "http://127.0.0.1:17676/mcp");
-  assert.equal(report.publicMcpUrl, "http://127.0.0.1:17676/mcp");
-  assert.equal(report.localHealth?.ok, false);
-  assert.equal(report.publicHealth?.skipped, true);
-  assert.equal(report.cliVersion.length > 0, true);
-  // Never include the owner token or auth file contents.
-  const serialized = JSON.stringify(report);
-  assert.doesNotMatch(serialized, /ownerToken/);
-  assert.doesNotMatch(serialized, /DEVSPACE_OAUTH_OWNER_TOKEN/);
+  const result = assessTailscaleFunnelState(
+    "https://qianhaos-mac-studio.tail35a51e.ts.net",
+    statusJson,
+    funnelJson,
+  );
+
+  assert.equal(result.dnsName, "qianhaos-mac-studio.tail35a51e.ts.net");
+  assert.equal(result.funnelMatchesPublicHost, true);
+  assert.deepEqual(result.extraFunnelHosts, ["qianhaos-mac-studio-1.tail35a51e.ts.net"]);
+});
+
+test("assessTailscaleFunnelState flags a configured public host missing from Funnel", () => {
+  const result = assessTailscaleFunnelState(
+    "https://dev.example.com",
+    JSON.stringify({ Self: { DNSName: "qianhaos-mac-studio.tail35a51e.ts.net." } }),
+    JSON.stringify({ Web: {}, AllowFunnel: {} }),
+  );
+
+  assert.equal(result.funnelMatchesPublicHost, false);
+  assert.deepEqual(result.funnelHosts, []);
 });
 
 test("formatDoctorReport includes expected sections and omits secrets", () => {
@@ -78,9 +121,17 @@ test("formatDoctorReport includes expected sections and omits secrets", () => {
     cliPathMismatch: true,
     providerAvailability: [
       { name: "codex" as const, available: true },
-      { name: "luna" as const, available: false, reason: "kimi executable not found" },
+      { name: "luna" as const, available: false, reason: "API key missing" },
+      { name: "kimi" as const, available: false, reason: "kimi executable not found" },
     ],
-    tailscale: { installed: true, serve: "no serve", funnel: "funnel on 443" },
+    tailscale: {
+      installed: true,
+      serve: "no serve",
+      funnel: "funnel on 443",
+      dnsName: "dev.example.com",
+      funnelMatchesPublicHost: true,
+      extraFunnelHosts: ["old-dev.example.com"],
+    },
   };
   const formatted = formatDoctorReport(report);
 
@@ -93,5 +144,8 @@ test("formatDoctorReport includes expected sections and omits secrets", () => {
   assert.match(formatted, /Provider availability:/);
   assert.match(formatted, /Tailscale serve:/);
   assert.match(formatted, /Tailscale funnel:/);
+  assert.match(formatted, /Tailscale node DNS: dev\.example\.com/);
+  assert.match(formatted, /Funnel covers public host: yes/);
+  assert.match(formatted, /Extra Funnel hosts: old-dev\.example\.com/);
   assert.doesNotMatch(formatted, /ownerToken/);
 });

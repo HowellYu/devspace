@@ -9,7 +9,7 @@ import { acpCommandFor, createLocalAgentAdapter } from "./local-agent-adapters.j
 
 assert.deepEqual(acpCommandFor("cursor", {}), ["cursor-agent", "acp"]);
 assert.deepEqual(acpCommandFor("copilot", {}), ["copilot", "--acp"]);
-assert.deepEqual(acpCommandFor("luna", {}), ["kimi", "acp"]);
+assert.deepEqual(acpCommandFor("kimi", {}), ["kimi", "acp"]);
 assert.deepEqual(
   acpCommandFor("cursor", { CURSOR_COMMAND: "/opt/tools/cursor-agent" }),
   ["/opt/tools/cursor-agent", "acp"],
@@ -19,7 +19,7 @@ assert.deepEqual(
   ["/opt/tools/gh-copilot", "--acp"],
 );
 assert.deepEqual(
-  acpCommandFor("luna", { LUNA_COMMAND: "/opt/luna/bin/kimi" }),
+  acpCommandFor("kimi", { LUNA_COMMAND: "/opt/luna/bin/kimi" }),
   ["/opt/luna/bin/kimi", "acp"],
 );
 
@@ -160,8 +160,8 @@ if (process.platform !== "win32") {
     rmSync(sandbox, { recursive: true, force: true });
   }
 
-  // Luna runs through the same generic ACP adapter, resolved via LUNA_COMMAND,
-  // including loaded-session follow-ups.
+  // Kimi runs through the generic ACP adapter. LUNA_COMMAND remains a legacy
+  // executable alias so existing installations keep working.
   {
     const lunaSandbox = mkdtempSync(join(tmpdir(), "devspace-acp-luna-test-"));
     const lunaWorkspace = join(lunaSandbox, "workspace");
@@ -180,8 +180,8 @@ if (process.platform !== "win32") {
       FAKE_ACP_STORE: lunaStorePath,
     };
     try {
-      const luna = createLocalAgentAdapter("luna", { childEnvironment: lunaChildEnvironment });
-      assert.equal(luna.provider, "luna");
+      const luna = createLocalAgentAdapter("kimi", { childEnvironment: lunaChildEnvironment });
+      assert.equal(luna.provider, "kimi");
 
       const first = await luna.run({
         prompt: "remember token quokka-99",

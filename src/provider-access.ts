@@ -124,7 +124,7 @@ function validateProviderPath(provider: LocalAgentProvider, path: string): void 
   const allowedHomes: Partial<Record<LocalAgentProvider, string[]>> = {
     codex: [join(home, ".codex")],
     claude: [join(home, ".claude")],
-    luna: [join(home, ".kimi-code")],
+    kimi: [join(home, ".kimi-code")],
     cursor: [join(home, ".cursor")],
     copilot: [join(home, ".config", "github-copilot")],
     pi: [join(home, ".pi")],

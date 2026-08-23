@@ -113,8 +113,7 @@ same project. The implementation retains a non-destructive legacy fallback from
 the prior global namespace and migrates legacy content on write. Existing legacy
 data is not deleted automatically.
 
-DevSpace creates `.devspace/.gitignore` containing `memory/` when that file does
-not already exist. It never overwrites an existing `.devspace/.gitignore`.
+For Git workspaces, DevSpace hides `.devspace/` through the repository-local `.git/info/exclude` so automatic memory initialization never dirties source status or requires a tracked ignore change. For non-Git workspaces it falls back to `.devspace/.gitignore` containing `memory/` and never overwrites an existing file.
 
 Available MCP operations are:
 

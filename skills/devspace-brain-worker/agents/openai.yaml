@@ -1,0 +1,10 @@
+interface:
+  display_name: DevSpace Brain/Worker
+  short_description: Orchestrate DevSpace workspaces, workers, review, memory, and security
+policy:
+  products:
+  - chatgpt
+  - codex
+  - api
+  - atlas
+  allow_implicit_invocation: true

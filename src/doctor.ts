@@ -9,6 +9,12 @@ import { fileURLToPath } from "node:url";
 import { getLocalAgentProviderAvailabilitySnapshot, refreshLocalAgentProviderAvailabilitySnapshot, type LocalAgentProviderAvailability } from "./local-agent-availability.js";
 import { expandHomePath } from "./roots.js";
 import { devspaceConfigDir, loadDevspaceFiles } from "./user-config.js";
+import {
+  execTailscale,
+  probePublicHealth,
+  probePublicMcpDiscovery,
+  resolveTailscaleCommand,
+} from "./tailscale-funnel.js";
 
 export interface DoctorConfig {
   host: string;
@@ -37,12 +43,24 @@ export interface DoctorReport {
   allowedRoots: string[];
   allowedHosts: string[];
   localHealth?: { ok: boolean; status: number; error?: string };
-  publicHealth?: { ok: boolean; status?: number; error?: string; skipped?: boolean };
+  publicHealth?: { ok: boolean; status?: number; error?: string; skipped?: boolean; addresses?: string[]; forcedPublicIngress?: boolean };
+  publicMcpDiscovery?: { ok: boolean; status?: number; error?: string; addresses?: string[]; forcedPublicIngress?: boolean };
   cliVersion: string;
   cliPath: string;
   cliPathMismatch?: boolean;
   providerAvailability: LocalAgentProviderAvailability[];
-  tailscale?: { installed: boolean; serve?: string; funnel?: string; error?: string };
+  tailscale?: {
+    installed: boolean;
+    serve?: string;
+    funnel?: string;
+    dnsName?: string;
+    funnelHosts?: string[];
+    funnelMatchesPublicHost?: boolean;
+    extraFunnelHosts?: string[];
+    cliSource?: "macos-app" | "path";
+    cliPath?: string;
+    error?: string;
+  };
 }
 
 const require = createRequire(import.meta.url);
@@ -74,13 +92,14 @@ export async function runDoctorDiagnostics(config: DoctorConfig, env: NodeJS.Pro
     allowedHosts: config.allowedHosts,
     localHealth: await checkLocalHealth(config.host, config.port),
     publicHealth: await checkPublicHealthAdvisory(config.publicBaseUrl),
+    publicMcpDiscovery: await checkPublicMcpDiscoveryAdvisory(config.publicBaseUrl),
     cliVersion,
     cliPath,
     cliPathMismatch,
     providerAvailability: config.subagents
       ? refreshLocalAgentProviderAvailabilitySnapshot(env)
       : getLocalAgentProviderAvailabilitySnapshot(env),
-    tailscale: checkTailscaleStatus(),
+    tailscale: checkTailscaleStatus(config.publicBaseUrl),
   };
 }
 
@@ -110,7 +129,13 @@ export function formatDoctorReport(report: DoctorReport): string {
     lines.push("Public health: skipped (no publicBaseUrl configured)");
   } else if (report.publicHealth) {
     const health = report.publicHealth;
-    lines.push(`Public health: ${health.ok ? `reachable (${health.status})` : `advisory: unreachable${health.error ? `: ${health.error}` : ""}`}`);
+    const via = health.forcedPublicIngress ? ` via public Funnel ingress${health.addresses?.length ? ` [${health.addresses.join(", ")}]` : ""}` : "";
+    lines.push(`Public health: ${health.ok ? `reachable (${health.status})${via}` : `advisory: unreachable${via}${health.error ? `: ${health.error}` : ""}`}`);
+  }
+  if (report.publicMcpDiscovery) {
+    const mcp = report.publicMcpDiscovery;
+    const via = mcp.forcedPublicIngress ? ` via public Funnel ingress${mcp.addresses?.length ? ` [${mcp.addresses.join(", ")}]` : ""}` : "";
+    lines.push(`Public MCP discovery: ${mcp.ok ? `ok (${mcp.status})${via}` : `FAILED${via}${mcp.error ? `: ${mcp.error}` : ""}`}`);
   }
 
   lines.push(`CLI version: ${report.cliVersion}`);
@@ -130,8 +155,20 @@ export function formatDoctorReport(report: DoctorReport): string {
       if (report.tailscale.error) {
         lines.push(`Tailscale: installed (status check failed: ${report.tailscale.error})`);
       } else {
+        if (report.tailscale.cliPath) {
+          lines.push(`Tailscale CLI: ${report.tailscale.cliPath}${report.tailscale.cliSource ? ` (${report.tailscale.cliSource})` : ""}`);
+        }
         lines.push(`Tailscale serve: ${report.tailscale.serve?.trim() || "no serve status"}`);
         lines.push(`Tailscale funnel: ${report.tailscale.funnel?.trim() || "no funnel status"}`);
+        if (report.tailscale.dnsName) {
+          lines.push(`Tailscale node DNS: ${report.tailscale.dnsName}`);
+        }
+        if (report.tailscale.funnelMatchesPublicHost !== undefined) {
+          lines.push(`Funnel covers public host: ${report.tailscale.funnelMatchesPublicHost ? "yes" : "NO"}`);
+        }
+        if ((report.tailscale.extraFunnelHosts?.length ?? 0) > 0) {
+          lines.push(`Extra Funnel hosts: ${report.tailscale.extraFunnelHosts!.join(", ")}`);
+        }
       }
     }
   }
@@ -221,55 +258,86 @@ async function checkLocalHealth(host: string, port: number): Promise<{ ok: boole
   });
 }
 
-async function checkPublicHealthAdvisory(publicBaseUrl: string): Promise<{ ok: boolean; status?: number; error?: string; skipped?: boolean } | undefined> {
+async function checkPublicHealthAdvisory(publicBaseUrl: string): Promise<DoctorReport["publicHealth"]> {
   const localUrl = new URL(publicBaseUrl);
   if (["localhost", "127.0.0.1", "[::1]"].includes(localUrl.hostname)) {
     return { skipped: true, ok: false };
   }
-
-  const { request } = publicBaseUrl.startsWith("https:")
-    ? require("node:https") as typeof import("node:https")
-    : require("node:http") as typeof import("node:http");
-  const url = new URL("/healthz", publicBaseUrl).toString();
-
-  return new Promise((resolve) => {
-    const req = request(url, { method: "GET", timeout: 5_000 }, (res) => {
-      const status = res.statusCode ?? 0;
-      res.resume();
-      resolve({ ok: status >= 200 && status < 300, status });
-    });
-    req.on("error", (error: Error) => {
-      resolve({ ok: false, error: error.message });
-    });
-    req.on("timeout", () => {
-      req.destroy();
-      resolve({ ok: false, error: "timeout" });
-    });
-    req.end();
-  });
+  const result = await probePublicHealth(publicBaseUrl);
+  return {
+    ...result,
+    forcedPublicIngress: localUrl.hostname.toLowerCase().endsWith(".ts.net"),
+  };
 }
 
-function checkTailscaleStatus(): { installed: boolean; serve?: string; funnel?: string; error?: string } | undefined {
-  try {
-    execFileSync("tailscale", ["version"], { encoding: "utf8", timeout: 3_000, stdio: ["ignore", "pipe", "ignore"] });
-  } catch {
-    return { installed: false };
-  }
+async function checkPublicMcpDiscoveryAdvisory(publicBaseUrl: string): Promise<DoctorReport["publicMcpDiscovery"]> {
+  const localUrl = new URL(publicBaseUrl);
+  if (["localhost", "127.0.0.1", "[::1]"].includes(localUrl.hostname)) return undefined;
+  const result = await probePublicMcpDiscovery(publicBaseUrl);
+  return {
+    ...result,
+    forcedPublicIngress: localUrl.hostname.toLowerCase().endsWith(".ts.net"),
+  };
+}
+
+function checkTailscaleStatus(publicBaseUrl: string): DoctorReport["tailscale"] {
+  const command = resolveTailscaleCommand();
+  if (!execTailscale(["version"])) return { installed: false };
 
   try {
-    const serve = execTailscale("serve", "status");
-    const funnel = execTailscale("funnel", "status");
-    return { installed: true, serve, funnel };
+    const serve = execTailscale(["serve", "status"]);
+    const funnel = execTailscale(["funnel", "status"]);
+    const statusJson = execTailscale(["status", "--json"]);
+    const funnelJson = execTailscale(["funnel", "status", "--json"]);
+    const assessment = assessTailscaleFunnelState(publicBaseUrl, statusJson, funnelJson);
+    return { installed: true, serve, funnel, cliSource: command.source, cliPath: command.executable, ...assessment };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    return { installed: true, error: message };
+    return { installed: true, cliSource: command.source, cliPath: command.executable, error: message };
   }
 }
 
-function execTailscale(...args: string[]): string | undefined {
+export function assessTailscaleFunnelState(
+  publicBaseUrl: string,
+  statusJson?: string,
+  funnelJson?: string,
+): Pick<NonNullable<DoctorReport["tailscale"]>, "dnsName" | "funnelHosts" | "funnelMatchesPublicHost" | "extraFunnelHosts"> {
+  const publicHost = new URL(publicBaseUrl).hostname.toLowerCase();
+  let dnsName: string | undefined;
+  let funnelHosts: string[] | undefined;
+
   try {
-    return execFileSync("tailscale", args, { encoding: "utf8", timeout: 5_000, stdio: ["ignore", "pipe", "ignore"] }).trim() || undefined;
-  } catch (error) {
-    return undefined;
+    const status = statusJson ? JSON.parse(statusJson) as { Self?: { DNSName?: unknown } } : undefined;
+    if (typeof status?.Self?.DNSName === "string") {
+      dnsName = status.Self.DNSName.replace(/\.$/, "").toLowerCase();
+    }
+  } catch {
+    // Keep doctor advisory-only when Tailscale returns unexpected JSON.
   }
+
+  try {
+    const funnelStatus = funnelJson ? JSON.parse(funnelJson) as { Web?: Record<string, unknown>; AllowFunnel?: Record<string, unknown> } : undefined;
+    const keys = new Set<string>([
+      ...Object.keys(funnelStatus?.Web ?? {}),
+      ...Object.keys(funnelStatus?.AllowFunnel ?? {}),
+    ]);
+    funnelHosts = [...keys]
+      .map((entry) => entry.replace(/:\d+$/, "").toLowerCase())
+      .filter(Boolean)
+      .sort();
+  } catch {
+    // Keep doctor advisory-only when Tailscale returns unexpected JSON.
+  }
+
+  if (!funnelHosts) {
+    return { dnsName };
+  }
+
+  const expectedHosts = new Set([publicHost, dnsName].filter((value): value is string => Boolean(value)));
+  return {
+    dnsName,
+    funnelHosts,
+    funnelMatchesPublicHost: funnelHosts.includes(publicHost),
+    extraFunnelHosts: funnelHosts.filter((host) => !expectedHosts.has(host)),
+  };
 }

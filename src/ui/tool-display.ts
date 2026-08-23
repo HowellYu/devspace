@@ -133,7 +133,6 @@ export function getToolHeaderSummary(card: ToolResultCard): ToolHeaderSummary {
   if (card.tool === "open_workspace") {
     const parts = [
       countLabel(summaryNumber(summary, "agentsFiles"), "instruction"),
-      countLabel(summaryNumber(summary, "skills"), "skill"),
     ].filter((part): part is string => Boolean(part));
     return parts.length > 0 ? { kind: "text", text: parts.join(" · ") } : { kind: "empty" };
   }

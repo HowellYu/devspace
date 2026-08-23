@@ -35,6 +35,7 @@ export interface ServerConfig {
   sandboxNetwork: boolean;
   sandboxReadPaths: string[];
   sandboxWritePaths: string[];
+  tailscaleFunnelWatch?: boolean;
   logging: LoggingConfig;
 }
 
@@ -279,6 +280,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     sandboxNetwork: env.DEVSPACE_SANDBOX_NETWORK === undefined ? true : parseBoolean(env.DEVSPACE_SANDBOX_NETWORK),
     sandboxReadPaths: parseResolvedPathList(env.DEVSPACE_SANDBOX_READ_PATHS),
     sandboxWritePaths: parseResolvedPathList(env.DEVSPACE_SANDBOX_WRITE_PATHS),
+    tailscaleFunnelWatch: env.DEVSPACE_TAILSCALE_FUNNEL_WATCH === undefined
+      ? new URL(publicBaseUrl).hostname.toLowerCase().endsWith(".ts.net")
+      : parseBoolean(env.DEVSPACE_TAILSCALE_FUNNEL_WATCH),
     logging: parseLoggingConfig(env),
   };
 }

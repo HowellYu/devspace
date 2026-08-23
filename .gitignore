@@ -3,3 +3,7 @@ dist/
 releases/
 .env
 *.log
+.DS_Store
+browser-extension/
+.agents/plan/devspace-kimi-modified-plan.md
+.agents/plan/luna-brain-worker-plan.md

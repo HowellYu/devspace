@@ -69,6 +69,27 @@ assert.equal(existsSync(seededSkillPaths[0]), true);
 assert.match(readFileSync(seededSkillPaths[0], "utf8"), /name: subagent-delegation/);
 assert.deepEqual(ensureDevspaceDefaultSkills({ DEVSPACE_CONFIG_DIR: seededConfigDir }), []);
 
+writeFileSync(
+  seededSkillPaths[0],
+  [
+    "---",
+    "name: subagent-delegation",
+    "description: Delegate coding tasks to user-configured DevSpace subagents.",
+    "---",
+    "",
+    "Use the CLI commands below only when the native MCP tools are not available:",
+    "",
+  ].join("\n"),
+);
+assert.deepEqual(
+  ensureDevspaceDefaultSkills({ DEVSPACE_CONFIG_DIR: seededConfigDir }),
+  seededSkillPaths,
+);
+assert.match(
+  readFileSync(seededSkillPaths[0], "utf8"),
+  /## Published-app worker bridge/,
+);
+
 assert.throws(
   () => loadConfig({ ...baseEnv, DEVSPACE_WIDGETS: "invalid" }),
   /Invalid DEVSPACE_WIDGETS: invalid/,
@@ -169,7 +190,16 @@ assert.throws(
 );
 
 assert.equal(loadConfig(baseEnv).publicBaseUrl, "http://127.0.0.1:7676");
+assert.equal(loadConfig(baseEnv).tailscaleFunnelWatch, false);
 assert.deepEqual(loadConfig(baseEnv).allowedHosts, ["localhost", "127.0.0.1", "::1"]);
+assert.equal(
+  loadConfig({ ...baseEnv, DEVSPACE_PUBLIC_BASE_URL: "https://host.tailnet.ts.net" }).tailscaleFunnelWatch,
+  true,
+);
+assert.equal(
+  loadConfig({ ...baseEnv, DEVSPACE_PUBLIC_BASE_URL: "https://host.tailnet.ts.net", DEVSPACE_TAILSCALE_FUNNEL_WATCH: "0" }).tailscaleFunnelWatch,
+  false,
+);
 
 assert.equal(
   loadConfig({ ...baseEnv, DEVSPACE_PUBLIC_BASE_URL: "https://abc.trycloudflare.com/" }).publicBaseUrl,

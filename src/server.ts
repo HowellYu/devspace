@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { access, realpath } from "node:fs/promises";
+import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { createMcpExpressApp } from "@modelcontextprotocol/sdk/server/express.js";
@@ -48,6 +49,7 @@ import {
   McpSessionRegistry,
   type McpSessionCloseResult,
 } from "./mcp-sessions.js";
+import { prefersStatelessMcpTransport } from "./mcp-transport-policy.js";
 import { ProcessSessionManager, type ProcessSnapshot } from "./process-sessions.js";
 import { createReviewCheckpointManager } from "./review-checkpoints.js";
 import {
@@ -58,6 +60,7 @@ import { createPathGrantStore } from "./path-grants.js";
 import { openAiConversationScopeId } from "./request-meta.js";
 import { shutdownHttpServer } from "./server-shutdown.js";
 import { formatPathForPrompt } from "./skills.js";
+import { ensureDevspaceDefaultSkills } from "./user-config.js";
 import { createWorkspaceStore } from "./workspace-store.js";
 import { formatAgentsPath, WorkspaceRegistry } from "./workspaces.js";
 import { summarizeLocalAgentProfile } from "./local-agent-profiles.js";
@@ -74,6 +77,7 @@ import {
   createLocalAgentOrchestrator,
   type LocalAgentOrchestrator,
 } from "./local-agent-orchestrator.js";
+import { startTailscaleFunnelWatchdog } from "./tailscale-funnel.js";
 
 type Transport = StreamableHTTPServerTransport;
 // MCP clients can reconnect without closing the previous transport. Bound stale
@@ -209,6 +213,8 @@ interface ToolLogFields {
 }
 
 function serverInstructions(config: ServerConfig): string {
+  const roots = `Permitted project roots are: ${config.allowedRoots.join(", ")}. When the user names one of these projects, call ${toolNames.openWorkspace} with its exact path first; do not try to enumerate a parent directory.`;
+  const maintenance = ` For explicit DevSpace recovery work, open the DevSpace project first; you may inspect or restart only its LaunchAgent with launchctl print or launchctl kickstart -k gui/$(id -u)/dev.devspace.agent.`;
   const artifactInstruction = config.artifactsEnabled && isArtifactDownloadSupportedPlatform()
     ? " When the user supplies or generates a file that is not present on the DevSpace host, use download_artifact with its native file value, the existing workspace ID, and a suitable relative destination path chosen from the user's request and project structure. The tool refuses to overwrite an existing destination and returns the normalized workspace-relative path. Use normal workspace tools when explicit inspection, replacement, movement, renaming, or deletion is needed. Do not recreate binary files with write/edit calls or place signed URLs, native file objects, base64 content, or invented host paths in shell commands or logs."
     : "";
@@ -216,7 +222,7 @@ function serverInstructions(config: ServerConfig): string {
     " If the turn successfully modifies files by creating, editing, overwriting, deleting, moving, or applying patches, call show_changes exactly once for that workspace after the final related file change and before your final response so the user can inspect the aggregate diff for that turn. Do not call it after every individual file change; do not skip it because individual file-change tools already returned diffs.";
 
   if (config.toolMode === "codex") {
-    return `Use DevSpace as a local coding workspace. Call ${toolNames.openWorkspace} once per project folder or worktree and reuse its workspaceId. Open it again when the workspaceId is invalid, the project changes, checkout/worktree mode changes, or another isolated worktree is needed. Use ${toolNames.read} for direct file reads, apply_patch for all file modifications, exec_command for inspection, tests, builds, and other commands, and write_stdin to poll or interact with running processes. Use ${toolNames.listProjectMemory}, ${toolNames.readProjectMemory}, and ${toolNames.writeProjectMemory} to access durable project memory across sessions; memory is stored inside the workspace at .devspace/memory/ and is only for durable project facts, decisions, and checkpoints. Follow instructions returned by ${toolNames.openWorkspace}; read applicable instruction and skill files before working in their scope.${artifactInstruction}${showChangesInstruction}`;
+    return `Use DevSpace as a local coding workspace. ${roots}${maintenance} Call ${toolNames.openWorkspace} once per project folder or worktree and reuse its workspaceId. Open it again when the workspaceId is invalid, the project changes, checkout/worktree mode changes, or another isolated worktree is needed. Use ${toolNames.read} for direct file reads, apply_patch for all file modifications, exec_command for inspection, tests, builds, and other commands, and write_stdin to poll or interact with running processes. Use ${toolNames.listProjectMemory}, ${toolNames.readProjectMemory}, and ${toolNames.writeProjectMemory} to access durable project memory across sessions; memory is stored inside the workspace at .devspace/memory/ and is only for durable project facts, decisions, and checkpoints. Follow instructions returned by ${toolNames.openWorkspace}; read applicable instruction and skill files before working in their scope.${artifactInstruction}${showChangesInstruction}`;
   }
 
   const inspection = config.toolMode !== "full"
@@ -230,12 +236,12 @@ function serverInstructions(config: ServerConfig): string {
   const agentsMd = `Follow instructions returned by ${toolNames.openWorkspace}. Before working under a path listed in availableAgentsFiles, use ${toolNames.read} to inspect that instruction file and follow it. `;
 
   const workers = config.subagents
-    ? `For subagent delegation, prefer the native MCP tools start_worker, wait_worker, inspect_worker, continue_worker, and stop_worker. Use the devspace agents CLI only as a fallback or for debugging. `
+    ? `For subagent delegation, prefer the native MCP tools start_worker, wait_worker, inspect_worker, continue_worker, and stop_worker. If this published host action list omits those worker tools but still exposes ${toolNames.shell}, use the sandbox-safe \`devspace agents bridge <JSON>\` compatibility command through ${toolNames.shell}; do not run the ordinary local devspace agents CLI inside the workspace shell. `
     : "";
 
   const memory = `Project memory is durable across sessions for the same canonical project root and is shared with other workspace-aware agents. open_workspace automatically returns a bounded memoryBootstrap plus a content-derived memoryRevision. Treat that bootstrap as the current handoff. Use ${toolNames.listProjectMemory} and ${toolNames.readProjectMemory} only when more detail is needed. Keep memory synchronized automatically at meaningful milestones with ${toolNames.writeProjectMemory}: update progress.md and next-steps.md when implementation state changes, context.md only for stable facts, and decisions.md only for durable decisions. Do not write memory for trivial reads, do not store secrets or chain-of-thought, and overwrite stale compact state rather than appending transcripts.`;
 
-  return `Use DevSpace as a local coding workspace. Call ${toolNames.openWorkspace} once per project folder or worktree to obtain a workspaceId. Reuse that same workspaceId for all later file, search, edit, write, show-changes, shell, memory, and worker tools in that folder; do not call ${toolNames.openWorkspace} again unless switching to a different project folder, changing checkout/worktree mode, the workspaceId is rejected as unknown, or a new isolated worktree is requested. ${agentsMd}${skills}${workers}${memory} ${inspection}Prefer ${toolNames.edit} for targeted modifications, ${toolNames.write} only for new files or complete rewrites, and ${toolNames.shell} for tests, builds, git inspection, package scripts, and commands that are better executed by the shell. Do not create or modify files with ${toolNames.shell}; avoid shell redirection, heredocs, tee, sed -i, perl -i, node/python/ruby scripts, or any command whose purpose is to write project files.${artifactInstruction}${showChangesInstruction}`;
+  return `Use DevSpace as a local coding workspace. ${roots}${maintenance} Call ${toolNames.openWorkspace} once per project folder or worktree to obtain a workspaceId. Reuse that same workspaceId for all later file, search, edit, write, show-changes, shell, memory, and worker tools in that folder; do not call ${toolNames.openWorkspace} again unless switching to a different project folder, changing checkout/worktree mode, the workspaceId is rejected as unknown, or a new isolated worktree is requested. ${agentsMd}${skills}${workers}${memory} ${inspection}Prefer ${toolNames.edit} for targeted modifications, ${toolNames.write} only for new files or complete rewrites, and ${toolNames.shell} for tests, builds, git inspection, package scripts, and commands that are better executed by the shell. Do not create or modify files with ${toolNames.shell}; avoid shell redirection, heredocs, tee, sed -i, perl -i, node/python/ruby scripts, or any command whose purpose is to write project files.${artifactInstruction}${showChangesInstruction}`;
 }
 
 function formatVisibleAgent(agent: {
@@ -347,6 +353,41 @@ const stopWorkerOutputSchema = z.object({
   status: workerStatusSchema,
 });
 
+const shellWorkerBridgeRequestSchema = z.discriminatedUnion("op", [
+  z.object({
+    op: z.literal("start"),
+    target: z.string().min(1),
+    prompt: z.string().min(1),
+    model: z.string().optional(),
+    thinking: z.string().optional(),
+    fallback: z.boolean().optional(),
+    executionTimeoutSeconds: z.number().int().min(1).max(7200).optional(),
+  }),
+  z.object({
+    op: z.literal("wait"),
+    workerId: z.string().min(1),
+    timeoutSeconds: z.number().int().min(1).max(3600).optional(),
+  }),
+  z.object({
+    op: z.literal("inspect"),
+    workerId: z.string().min(1),
+  }),
+  z.object({
+    op: z.literal("continue"),
+    workerId: z.string().min(1),
+    prompt: z.string().min(1),
+    model: z.string().optional(),
+    thinking: z.string().optional(),
+    executionTimeoutSeconds: z.number().int().min(1).max(7200).optional(),
+  }),
+  z.object({
+    op: z.literal("stop"),
+    workerId: z.string().min(1),
+  }),
+]);
+
+type ShellWorkerBridgeRequest = z.infer<typeof shellWorkerBridgeRequestSchema>;
+
 const workspaceLocalAgentProviderOutputSchema = z.object({
   name: z.string(),
   available: z.boolean(),
@@ -436,6 +477,36 @@ function logFailedToolResponse(
 
 function textBlock(text: string): ToolContent {
   return { type: "text", text };
+}
+
+const SHELL_WORKER_BRIDGE_PREFIX = "devspace agents bridge ";
+
+function parseShellWorkerBridgeRequest(command: string): ShellWorkerBridgeRequest | null {
+  const trimmed = command.trim();
+  if (!trimmed.startsWith(SHELL_WORKER_BRIDGE_PREFIX)) return null;
+
+  const payload = trimmed.slice(SHELL_WORKER_BRIDGE_PREFIX.length).trim();
+  if (!payload) {
+    throw new Error("devspace agents bridge requires a JSON request payload.");
+  }
+
+  try {
+    return shellWorkerBridgeRequestSchema.parse(JSON.parse(payload));
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`Invalid devspace agents bridge request: ${message}`);
+  }
+}
+
+async function assertWorkerWorkspace(
+  orchestrator: LocalAgentOrchestrator,
+  workerId: string,
+  workspaceId: string,
+): Promise<void> {
+  const { record } = await orchestrator.inspect(workerId);
+  if (record.workspaceId !== workspaceId) {
+    throw new Error(`Worker ${workerId} belongs to a different workspace.`);
+  }
 }
 
 function textSummary(content: ToolContent[]): {
@@ -950,8 +1021,8 @@ export function createMcpServer(
       const availableAgentsFileOutputs = includeBootstrapContext ? cardAvailableAgentsFiles : [];
       const memoryInstruction = "Treat memoryBootstrap as the current compact cross-agent workspace handoff. Keep project memory synchronized automatically at meaningful milestones: update progress.md and next-steps.md when implementation state changes, context.md only for stable project facts, and decisions.md only for durable decisions. Do not write memory for trivial reads or transient discussion; keep files compact and overwrite stale state instead of appending transcripts.";
       const cardInstruction = config.skillsEnabled
-        ? `Use this workspaceId in all subsequent tool calls for this project. Do not call open_workspace again for this same folder unless this workspaceId stops working, you switch to a different project folder or checkout/worktree mode, or the user requests a new isolated worktree. Follow loaded agentsFiles instructions. Before working under a path listed in availableAgentsFiles, read that instruction file. When a task matches an available skill in skills, read its path before proceeding. For subagent delegation, prefer start_worker, wait_worker, inspect_worker, continue_worker, and stop_worker; use the devspace agents CLI only as a fallback or for debugging. ${memoryInstruction}`
-        : `Use this workspaceId in all subsequent tool calls for this project. Do not call open_workspace again for this same folder unless this workspaceId stops working, you switch to a different project folder or checkout/worktree mode, or the user requests a new isolated worktree. Follow loaded agentsFiles instructions. Before working under a path listed in availableAgentsFiles, read that instruction file. For subagent delegation, prefer start_worker, wait_worker, inspect_worker, continue_worker, and stop_worker; use the devspace agents CLI only as a fallback or for debugging. ${memoryInstruction}`;
+        ? `Use this workspaceId in all subsequent tool calls for this project. Do not call open_workspace again for this same folder unless this workspaceId stops working, you switch to a different project folder or checkout/worktree mode, or the user requests a new isolated worktree. Follow loaded agentsFiles instructions. Before working under a path listed in availableAgentsFiles, read that instruction file. When a task matches an available skill in skills, read its path before proceeding. For subagent delegation, prefer start_worker, wait_worker, inspect_worker, continue_worker, and stop_worker; if this published host does not expose those worker actions, use the sandbox-safe devspace agents bridge JSON command through bash instead of the ordinary local devspace agents CLI. ${memoryInstruction}`
+        : `Use this workspaceId in all subsequent tool calls for this project. Do not call open_workspace again for this same folder unless this workspaceId stops working, you switch to a different project folder or checkout/worktree mode, or the user requests a new isolated worktree. Follow loaded agentsFiles instructions. Before working under a path listed in availableAgentsFiles, read that instruction file. For subagent delegation, prefer start_worker, wait_worker, inspect_worker, continue_worker, and stop_worker; if this published host does not expose those worker actions, use the sandbox-safe devspace agents bridge JSON command through bash instead of the ordinary local devspace agents CLI. ${memoryInstruction}`;
       const instruction = workspaceReused
         ? [
             `Workspace already open as ${workspace.id}.`,
@@ -1881,14 +1952,170 @@ export function createMcpServer(
         workspace,
         workingDirectory,
       );
-      const response = await runShellTool(input, {
-        cwd,
-        root: workspace.root,
-        workspaceId,
-        readRoots: workspaces.readRoots(workspace),
-        writeRoots: workspaces.writeRoots(workspace),
-        sandbox: config,
-      });
+      let response: Awaited<ReturnType<typeof runShellTool>> | undefined;
+      let bridgeRequest: ShellWorkerBridgeRequest | null = null;
+      try {
+        bridgeRequest = parseShellWorkerBridgeRequest(input.command);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        response = { content: [textBlock(message)], isError: true };
+      }
+
+      if (bridgeRequest) {
+        if (!config.subagents) {
+          response = {
+            content: [textBlock("DevSpace subagents are disabled for this server.")],
+            isError: true,
+          };
+        } else {
+          try {
+            switch (bridgeRequest.op) {
+              case "start": {
+                const { record, fallbackUsed } = await localAgentOrchestratorInstance.start({
+                  workspaceId,
+                  workspaceRoot: workspace.root,
+                  grantScopeRoot: workspaces.grantScopeRoot(workspace),
+                  target: bridgeRequest.target,
+                  prompt: bridgeRequest.prompt,
+                  model: bridgeRequest.model,
+                  thinking: bridgeRequest.thinking,
+                  fallback: bridgeRequest.fallback,
+                  executionTimeoutSeconds: bridgeRequest.executionTimeoutSeconds,
+                });
+                response = {
+                  content: [textBlock(JSON.stringify({
+                    workerId: record.id,
+                    status: record.status,
+                    provider: record.provider,
+                    profile: record.profileName,
+                    model: record.model,
+                    thinking: record.thinking,
+                    executionTimeoutSeconds: record.executionTimeoutSeconds,
+                    fallbackUsed,
+                  }))],
+                };
+                break;
+              }
+              case "wait": {
+                await assertWorkerWorkspace(
+                  localAgentOrchestratorInstance,
+                  bridgeRequest.workerId,
+                  workspaceId,
+                );
+                const { record, timedOut } = await localAgentOrchestratorInstance.wait(
+                  bridgeRequest.workerId,
+                  bridgeRequest.timeoutSeconds ?? 300,
+                );
+                response = {
+                  content: [textBlock(JSON.stringify({
+                    workerId: record.id,
+                    status: record.status,
+                    provider: record.provider,
+                    profile: record.profileName,
+                    latestResponse: record.latestResponse,
+                    error: record.error,
+                    timedOut,
+                  }))],
+                };
+                break;
+              }
+              case "inspect": {
+                await assertWorkerWorkspace(
+                  localAgentOrchestratorInstance,
+                  bridgeRequest.workerId,
+                  workspaceId,
+                );
+                const { record, checkpoint, elapsedSeconds, remainingExecutionSeconds } =
+                  await localAgentOrchestratorInstance.inspect(bridgeRequest.workerId, {
+                    reviewCheckpoints,
+                  });
+                response = {
+                  content: [textBlock(JSON.stringify({
+                    workerId: record.id,
+                    status: record.status,
+                    provider: record.provider,
+                    profile: record.profileName,
+                    model: record.model,
+                    thinking: record.thinking,
+                    latestResponse: record.latestResponse,
+                    error: record.error,
+                    providerSessionId: record.providerSessionId,
+                    elapsedSeconds,
+                    remainingExecutionSeconds,
+                    changedFiles: checkpoint?.files ?? [],
+                    checkpointSummary: checkpoint?.summary,
+                    patchPreview: checkpoint?.patchPreview,
+                    patchPreviewTruncated: checkpoint?.patchPreviewTruncated,
+                  }))],
+                };
+                break;
+              }
+              case "continue": {
+                await assertWorkerWorkspace(
+                  localAgentOrchestratorInstance,
+                  bridgeRequest.workerId,
+                  workspaceId,
+                );
+                const record = await localAgentOrchestratorInstance.continue(
+                  bridgeRequest.workerId,
+                  {
+                    prompt: bridgeRequest.prompt,
+                    model: bridgeRequest.model,
+                    thinking: bridgeRequest.thinking,
+                    executionTimeoutSeconds: bridgeRequest.executionTimeoutSeconds,
+                  },
+                );
+                response = {
+                  content: [textBlock(JSON.stringify({
+                    workerId: record.id,
+                    status: record.status,
+                    provider: record.provider,
+                    profile: record.profileName,
+                    model: record.model,
+                    thinking: record.thinking,
+                    executionTimeoutSeconds: record.executionTimeoutSeconds,
+                  }))],
+                };
+                break;
+              }
+              case "stop": {
+                await assertWorkerWorkspace(
+                  localAgentOrchestratorInstance,
+                  bridgeRequest.workerId,
+                  workspaceId,
+                );
+                const record = await localAgentOrchestratorInstance.stop(bridgeRequest.workerId);
+                response = {
+                  content: [textBlock(JSON.stringify({
+                    workerId: record.id,
+                    status: record.status,
+                  }))],
+                };
+                break;
+              }
+            }
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            response = { content: [textBlock(message)], isError: true };
+          }
+        }
+      } else if (!response) {
+        response = await runShellTool(input, {
+          cwd,
+          root: workspace.root,
+          workspaceId,
+          readRoots: workspaces.readRoots(workspace),
+          writeRoots: workspaces.writeRoots(workspace),
+          sandbox: config,
+        });
+      }
+
+      if (!response) {
+        response = {
+          content: [textBlock("DevSpace shell bridge produced no response.")],
+          isError: true,
+        };
+      }
 
       if (response.isError) {
         logFailedToolResponse(config, {
@@ -2068,6 +2295,7 @@ function registerLocalAgentWorkerTools(
     async ({ workspaceId, workerId, timeoutSeconds }) => {
       const startedAt = performance.now();
       workspaces.getWorkspace(workspaceId);
+      await assertWorkerWorkspace(orchestrator, workerId, workspaceId);
       const { record, timedOut } = await orchestrator.wait(workerId, timeoutSeconds);
       const result = timedOut
         ? `Worker ${workerId} is still ${record.status} after ${timeoutSeconds}s. The worker was not stopped.`
@@ -2113,6 +2341,7 @@ function registerLocalAgentWorkerTools(
     async ({ workspaceId, workerId }) => {
       const startedAt = performance.now();
       workspaces.getWorkspace(workspaceId);
+      await assertWorkerWorkspace(orchestrator, workerId, workspaceId);
       const { record, checkpoint, elapsedSeconds, remainingExecutionSeconds } = await orchestrator.inspect(workerId, { reviewCheckpoints });
       const result = `Worker ${workerId} status: ${record.status}.`;
       logToolCall(config, {
@@ -2174,6 +2403,7 @@ function registerLocalAgentWorkerTools(
     async ({ workspaceId, workerId, prompt, model, thinking, executionTimeoutSeconds }) => {
       const startedAt = performance.now();
       workspaces.getWorkspace(workspaceId);
+      await assertWorkerWorkspace(orchestrator, workerId, workspaceId);
       const record = await orchestrator.continue(workerId, { prompt, model, thinking, executionTimeoutSeconds });
       const result = `Continuing worker ${record.id} for ${record.profileName} using ${record.provider}.`;
       logToolCall(config, {
@@ -2216,6 +2446,7 @@ function registerLocalAgentWorkerTools(
     async ({ workspaceId, workerId }) => {
       const startedAt = performance.now();
       workspaces.getWorkspace(workspaceId);
+      await assertWorkerWorkspace(orchestrator, workerId, workspaceId);
       const record = await orchestrator.stop(workerId);
       const result = `Worker ${workerId} status: ${record.status}.`;
       logToolCall(config, {
@@ -2244,6 +2475,12 @@ export function createServer(
   config = loadConfig(),
   options: CreateServerOptions = {},
 ): RunningServer {
+  if (config.subagents) {
+    ensureDevspaceDefaultSkills({
+      ...process.env,
+      DEVSPACE_CONFIG_DIR: dirname(config.devspaceSkillsDir),
+    });
+  }
   const incomingArtifactAdapters = options.incomingArtifactAdapters
     ?? [createOpenAIIncomingArtifactAdapter()];
   const allowedHosts = config.allowedHosts.includes("*")
@@ -2303,9 +2540,17 @@ export function createServer(
       .then((results) => logSessionCloseResults("idle_timeout", results));
   }, MCP_SESSION_CLEANUP_INTERVAL_MS);
   sessionCleanupTimer.unref();
+  const tailscaleFunnelWatchdog = startTailscaleFunnelWatchdog({
+    enabled: config.tailscaleFunnelWatch ?? new URL(config.publicBaseUrl).hostname.toLowerCase().endsWith(".ts.net"),
+    publicBaseUrl: config.publicBaseUrl,
+    port: config.port,
+    logging: config.logging,
+  });
 
   if (config.logging.trustProxy) {
-    app.set("trust proxy", true);
+    // DevSpace sits behind one local reverse-proxy hop (for example Tailscale
+    // Serve/Funnel). Trust that hop, not arbitrary client-supplied chains.
+    app.set("trust proxy", 1);
   }
 
   app.use((req, res, next) => {
@@ -2316,7 +2561,25 @@ export function createServer(
     res.on("finish", () => {
       const path = requestPath(req);
       if (!config.logging.requests) return;
+      if (req.header("user-agent") === "openai-mcp/devspace-funnel-watch") return;
       if (!config.logging.assets && path.startsWith("/mcp-app-assets")) return;
+
+      const location = res.getHeader("location");
+      let redirectOutcome: string | undefined;
+      if (typeof location === "string") {
+        try {
+          const redirectUrl = new URL(location);
+          if (redirectUrl.hostname === "chatgpt.com") {
+            redirectOutcome = redirectUrl.searchParams.has("code")
+              ? "authorization_code"
+              : redirectUrl.searchParams.has("error")
+                ? `oauth_error:${redirectUrl.searchParams.get("error")}`
+                : "chatgpt_redirect";
+          }
+        } catch {
+          redirectOutcome = "invalid_redirect";
+        }
+      }
 
       logEvent(config.logging, "info", "http_request", {
         requestId,
@@ -2324,6 +2587,7 @@ export function createServer(
         path,
         status: res.statusCode,
         durationMs: Math.round(performance.now() - startedAt),
+        redirectOutcome,
         ...requestLogFields(req, config),
       });
     });
@@ -2341,6 +2605,40 @@ export function createServer(
       resourceName: "DevSpace",
     }),
   );
+
+  // Some MCP hosts still probe the legacy path-aware locations. Keep these
+  // aliases alongside the RFC 9728 route emitted by mcpAuthRouter so OAuth
+  // setup works across ChatGPT and older MCP clients.
+  const protectedResourceMetadata = {
+    resource: resourceServerUrl.href,
+    authorization_servers: [new URL(config.publicBaseUrl).href],
+    scopes_supported: config.oauth.scopes,
+    resource_name: "DevSpace",
+  };
+  const sendProtectedResourceMetadata = (_req: Request, res: Response) => {
+    res.setHeader("Access-Control-Allow-Origin", "*");
+    res.json(protectedResourceMetadata);
+  };
+  app.get("/.well-known/oauth-protected-resource", sendProtectedResourceMetadata);
+  app.get("/mcp/.well-known/oauth-protected-resource", sendProtectedResourceMetadata);
+  // ChatGPT also probes the legacy OpenID discovery URL during app setup.
+  // It uses the same OAuth authorization-server metadata in this deployment.
+  app.get("/.well-known/openid-configuration", (_req, res) => {
+    res.setHeader("Access-Control-Allow-Origin", "*");
+    res.json({
+      issuer: new URL(config.publicBaseUrl).href,
+      authorization_endpoint: new URL("/authorize", config.publicBaseUrl).href,
+      response_types_supported: ["code"],
+      code_challenge_methods_supported: ["S256"],
+      token_endpoint: new URL("/token", config.publicBaseUrl).href,
+      token_endpoint_auth_methods_supported: ["client_secret_post", "none"],
+      grant_types_supported: ["authorization_code", "refresh_token"],
+      scopes_supported: config.oauth.scopes,
+      revocation_endpoint: new URL("/revoke", config.publicBaseUrl).href,
+      revocation_endpoint_auth_methods_supported: ["client_secret_post"],
+      registration_endpoint: new URL("/register", config.publicBaseUrl).href,
+    });
+  });
 
   app.options("/mcp-app-assets/{*asset}", (_req, res) => {
     setAssetHeaders(res);
@@ -2365,16 +2663,24 @@ export function createServer(
     const requestId = res.locals.requestId as string | undefined;
     const sessionId = req.header("mcp-session-id");
     const initializeRequest = req.method === "POST" && isInitializeRequest(req.body);
+    // ChatGPT freezes an app's action list during publication before completing
+    // OAuth. Let it perform only the standard MCP discovery handshake; every
+    // workspace, file, and command operation still requires a bearer token.
+    const discoveryRequest = initializeRequest
+      || req.body?.method === "notifications/initialized"
+      || req.body?.method === "tools/list";
 
-    await new Promise<void>((resolve, reject) => {
-      bearerAuth(req, res, (error?: unknown) => {
-        if (error) reject(error);
-        else resolve();
+    if (!discoveryRequest) {
+      await new Promise<void>((resolve, reject) => {
+        bearerAuth(req, res, (error?: unknown) => {
+          if (error) reject(error);
+          else resolve();
+        });
       });
-    });
-    if (res.headersSent) return;
+      if (res.headersSent) return;
+    }
 
-    if (!req.auth?.resource || !checkResourceAllowed({ requestedResource: req.auth.resource, configuredResource: resourceServerUrl })) {
+    if (!discoveryRequest && (!req.auth?.resource || !checkResourceAllowed({ requestedResource: req.auth.resource, configuredResource: resourceServerUrl }))) {
       logEvent(config.logging, "warn", "auth_denied", {
         requestId,
         method: req.method,
@@ -2386,18 +2692,39 @@ export function createServer(
       return;
     }
 
+    const statelessTransport = prefersStatelessMcpTransport(req.header("user-agent"));
     logEvent(config.logging, "debug", "mcp_request", {
       requestId,
       method: req.method,
       sessionIdPresent: Boolean(sessionId),
       sessionIdPrefix: sessionIdPrefix(sessionId),
       isInitialize: initializeRequest,
+      statelessTransport,
     });
 
     try {
       let transport: Transport | undefined;
+      const connectTransport = async (candidate: Transport) => {
+        const server = createMcpServer(
+          config,
+          workspaces,
+          reviewCheckpoints,
+          processSessions,
+          localAgentProviders,
+          incomingArtifactAdapters,
+          undefined,
+          localAgentOrchestrator,
+        );
+        await server.connect(candidate);
+      };
 
-      if (sessionId) {
+      if (statelessTransport) {
+        // OpenAI's hosted MCP client reconnects aggressively and may discard
+        // mcp-session-id between requests. Keep its transport stateless so a
+        // reconnect never depends on an in-memory session surviving here.
+        transport = new StreamableHTTPServerTransport();
+        await connectTransport(transport);
+      } else if (sessionId) {
         transport = transports.get(sessionId);
         if (!transport) {
           sendJsonRpcError(res, 404, -32000, "Unknown MCP session");
@@ -2426,20 +2753,13 @@ export function createServer(
           }
         };
 
-        const server = createMcpServer(
-          config,
-          workspaces,
-          reviewCheckpoints,
-          processSessions,
-          localAgentProviders,
-          incomingArtifactAdapters,
-          undefined,
-          localAgentOrchestrator,
-        );
-        await server.connect(transport);
+        await connectTransport(transport);
       } else {
-        sendJsonRpcError(res, 400, -32000, "No valid MCP session");
-        return;
+        // Some MCP hosts do not retain mcp-session-id between requests. The
+        // protocol permits stateless transports; authorization above still
+        // protects every non-discovery operation.
+        transport = new StreamableHTTPServerTransport();
+        await connectTransport(transport);
       }
 
       await transport.handleRequest(req, res, req.body);
@@ -2462,6 +2782,7 @@ export function createServer(
     close: () => {
       closePromise ??= (async () => {
         clearInterval(sessionCleanupTimer);
+        tailscaleFunnelWatchdog.close();
         const results = await transports.closeAll();
         logSessionCloseResults("server_shutdown", results);
         processSessions.shutdown();

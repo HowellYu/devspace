@@ -101,11 +101,23 @@ export function generateOwnerToken(): string {
 
 export function ensureDevspaceDefaultSkills(env: NodeJS.ProcessEnv = process.env): string[] {
   const targetPath = join(devspaceSkillsDir(env), "subagent-delegation", "SKILL.md");
-  if (existsSync(targetPath)) return [];
-
   const sourcePath = new URL("../skills/subagent-delegation/SKILL.md", import.meta.url);
+  const bundled = readFileSync(sourcePath, "utf8");
+
+  if (existsSync(targetPath)) {
+    const installed = readFileSync(targetPath, "utf8");
+    // Migrate only the known bundled pre-bridge copy. Preserve any user-edited
+    // skill instead of treating ~/.devspace/skills as an always-managed tree.
+    const isLegacyBundledCopy = installed.includes(
+      "Use the CLI commands below only when the native MCP tools are not available:",
+    ) && !installed.includes("## Published-app worker bridge");
+    if (!isLegacyBundledCopy) return [];
+    writeFileSync(targetPath, bundled, { mode: 0o644 });
+    return [targetPath];
+  }
+
   mkdirSync(dirname(targetPath), { recursive: true });
-  writeFileSync(targetPath, readFileSync(sourcePath, "utf8"), { mode: 0o644 });
+  writeFileSync(targetPath, bundled, { mode: 0o644 });
   return [targetPath];
 }
 

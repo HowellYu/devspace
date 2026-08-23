@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { realpathSync, statSync } from "node:fs";
+import { readFileSync, realpathSync, statSync } from "node:fs";
 import { createRequire } from "node:module";
 import { homedir } from "node:os";
 import { stdin as input, stdout as output } from "node:process";
@@ -57,8 +57,9 @@ import {
 } from "./service.js";
 import { shutdownHttpServer } from "./server-shutdown.js";
 import { createProjectMemoryManager } from "./project-memory.js";
+import { createLunaSecretStore } from "./luna-secret.js";
 
-type Command = "serve" | "init" | "doctor" | "config" | "access" | "grants" | "provider-access" | "memory" | "agents" | "service" | "help" | "version";
+type Command = "serve" | "init" | "doctor" | "config" | "access" | "grants" | "provider-access" | "secret" | "memory" | "agents" | "service" | "help" | "version";
 const require = createRequire(import.meta.url);
 const SUPPORTED_NODE_RANGE = ">=20.12 <27";
 
@@ -91,6 +92,9 @@ async function main(argv: string[]): Promise<void> {
     case "provider-access":
       runProviderAccessCommand(args);
       return;
+    case "secret":
+      runSecretCommand(args);
+      return;
     case "memory":
       await runMemoryCommand(args);
       return;
@@ -111,7 +115,7 @@ async function main(argv: string[]): Promise<void> {
 
 function normalizeCommand(command: string | undefined): Command {
   if (!command || command === "serve" || command === "start") return "serve";
-  if (command === "init" || command === "doctor" || command === "config" || command === "access" || command === "grants" || command === "provider-access" || command === "memory" || command === "agents" || command === "service") return command;
+  if (command === "init" || command === "doctor" || command === "config" || command === "access" || command === "grants" || command === "provider-access" || command === "secret" || command === "memory" || command === "agents" || command === "service") return command;
   if (command === "help" || command === "--help" || command === "-h") return "help";
   if (command === "version" || command === "--version" || command === "-v") return "version";
   throw new Error(`Unknown command: ${command}`);
@@ -649,6 +653,47 @@ function runProviderAccessCommand(args: string[]): void {
   console.log(`Granted ${record.id}: ${record.provider} ${record.access} ${record.kind} ${record.path}`);
 }
 
+function runSecretCommand(args: string[]): void {
+  const [subcommand, name, ...extra] = args;
+  if (!subcommand || subcommand === "help" || subcommand === "--help" || subcommand === "-h") {
+    console.log([
+      "DevSpace local secrets",
+      "",
+      "Usage:",
+      "  devspace secret set openai-luna",
+      "  devspace secret status openai-luna",
+      "  devspace secret delete openai-luna",
+      "",
+      "The OpenAI Luna API key is stored in macOS Keychain and is never written to DevSpace config or workspace files.",
+    ].join("\n"));
+    return;
+  }
+  if (name !== "openai-luna" || extra.length > 0) {
+    throw new Error("Usage: devspace secret <set|status|delete> openai-luna");
+  }
+
+  const store = createLunaSecretStore();
+  if (subcommand === "set") {
+    if (!input.isTTY || !output.isTTY) {
+      throw new Error("`devspace secret set openai-luna` must be run in an interactive local terminal.");
+    }
+    console.log("Enter the OpenAI Luna API key in the macOS Keychain prompt. Input is hidden and never passes through DevSpace argv or config.");
+    store.setInteractive();
+    console.log("OpenAI Luna API key stored in macOS Keychain.");
+    return;
+  }
+  if (subcommand === "status") {
+    console.log(store.available() ? "OpenAI Luna API key is configured." : "OpenAI Luna API key is not configured.");
+    return;
+  }
+  if (subcommand === "delete") {
+    if (!store.delete()) throw new Error("OpenAI Luna API key was not found in macOS Keychain.");
+    console.log("OpenAI Luna API key removed from macOS Keychain.");
+    return;
+  }
+  throw new Error(`Unknown secret command: ${subcommand}`);
+}
+
 async function runMemoryCommand(args: string[]): Promise<void> {
   const [subcommand, ...rest] = args;
   if (!subcommand || subcommand === "help" || subcommand === "--help" || subcommand === "-h") {
@@ -737,6 +782,7 @@ function printHelp(): void {
       "  devspace access ...      Manage persisted authorized project roots locally",
       "  devspace grants ...      Manage local-only scoped extra-path grants",
       "  devspace provider-access ...  Manage provider-specific config access locally",
+      "  devspace secret ...      Manage local Keychain-backed provider secrets",
       "  devspace memory ...      Read/write compact workspace memory through a stable local protocol",
       "  devspace agents ls       List subagent sessions",
       "  devspace agents run <profile-or-provider-or-id> [--model <model>] [--thinking <level>] [--max-runtime <seconds>] <prompt>",
@@ -905,7 +951,15 @@ async function runAgentsWorker(args: string[]): Promise<void> {
   const config = loadConfig();
   const store = createLocalAgentStore(config);
   const orchestrator = createLocalAgentOrchestrator(config, store);
-  await orchestrator.executeWorker(id, promptFile);
+  await orchestrator.executeWorker(id, promptFile, readWorkerLunaApiKey());
+}
+
+function readWorkerLunaApiKey(): string | undefined {
+  try {
+    return readFileSync(3, "utf8") || undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 function formatAgentLine(agent: Pick<

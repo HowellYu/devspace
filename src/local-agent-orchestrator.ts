@@ -2,7 +2,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { runLocalAgentProvider } from "./local-agent-adapters.js";
+import { createLocalAgentAdapter, runLocalAgentProvider } from "./local-agent-adapters.js";
 import {
   shouldUseMacosSandbox,
   workerSandboxReadPaths,
@@ -36,6 +36,7 @@ import { resolveDevspaceCliPath } from "./service.js";
 import { buildSafeChildEnvironment } from "./process-environment.js";
 import { createPathGrantStore } from "./path-grants.js";
 import { createProviderAccessStore } from "./provider-access.js";
+import { createLunaSecretStore } from "./luna-secret.js";
 import type { ServerConfig } from "./config.js";
 
 export interface StartWorkerInput {
@@ -96,7 +97,7 @@ export interface LocalAgentOrchestrator {
   wait(workerId: string, timeoutSeconds: number): Promise<WaitWorkerResult>;
   inspect(workerId: string, options?: InspectWorkerOptions): Promise<InspectWorkerResult>;
   stop(workerId: string): Promise<LocalAgentRecord>;
-  executeWorker(recordId: string, promptFile: string): Promise<void>;
+  executeWorker(recordId: string, promptFile: string, lunaApiKey?: string): Promise<void>;
 }
 
 export interface CreateLocalAgentOrchestratorOptions {
@@ -107,7 +108,7 @@ export interface CreateLocalAgentOrchestratorOptions {
   spawnWorker?(
     recordId: string,
     promptFile: string,
-  ): ChildProcess | { pid?: number } | void | Promise<void>;
+  ): ChildProcess | { pid?: number } | void | Promise<ChildProcess | { pid?: number } | void>;
   refreshAvailability?(): LocalAgentProviderAvailability[];
   checkProviderAvailability?(provider: LocalAgentProvider): LocalAgentProviderAvailability;
 }
@@ -396,7 +397,7 @@ export function createLocalAgentOrchestrator(
       return store.update(record.id, { status: "stopped", workerPid: undefined });
     },
 
-    async executeWorker(recordId, promptFile): Promise<void> {
+    async executeWorker(recordId, promptFile, lunaApiKey): Promise<void> {
       const record = store.get(recordId);
       if (!record) {
         throw new Error(`Unknown subagent id: ${recordId}`);
@@ -421,10 +422,14 @@ export function createLocalAgentOrchestrator(
       try {
         const profiles = await loadLocalAgentProfiles(config, record.workspaceRoot);
         const profile = profiles.find((candidate) => candidate.name === record.profileName);
+        const runWorkerProvider = (provider: LocalAgentProvider, input: LocalAgentRunInput) =>
+          provider === "luna" && lunaApiKey
+            ? createLocalAgentAdapter("luna", { lunaApiKey }).run(input)
+            : runProvider(provider, input);
         let activeRecord = store.get(record.id) ?? record;
         let result: LocalAgentRunResult;
         try {
-          result = await runConfiguredProvider(profile, activeRecord, prompt, runProvider);
+          result = await runConfiguredProvider(profile, activeRecord, prompt, runWorkerProvider);
         } catch (primaryError) {
           const current = store.get(record.id);
           if (!current) throw primaryError;
@@ -447,7 +452,7 @@ export function createLocalAgentOrchestrator(
             error: `Primary provider ${current.provider} failed with a recoverable capacity/quota error; retrying with ${fallbackProvider}.`,
           });
           try {
-            result = await runConfiguredProvider(profile, activeRecord, prompt, runProvider);
+            result = await runConfiguredProvider(profile, activeRecord, prompt, runWorkerProvider);
           } catch (fallbackError) {
             throw new Error(
               `Primary provider ${current.provider} failed: ${errorMessage(primaryError)}; fallback provider ${fallbackProvider} failed: ${errorMessage(fallbackError)}`,
@@ -470,7 +475,7 @@ export function createLocalAgentOrchestrator(
         if (current?.status !== "timed_out") {
           store.update(record.id, {
             status: "error",
-            error: errorMessage(error),
+            error: sanitizeWorkerError(error),
             workerPid: undefined,
           });
         }
@@ -481,7 +486,7 @@ export function createLocalAgentOrchestrator(
   };
 }
 
-function defaultSpawnWorker(config: ServerConfig, record: LocalAgentRecord, promptFile: string): ChildProcess {
+async function defaultSpawnWorker(config: ServerConfig, record: LocalAgentRecord, promptFile: string): Promise<ChildProcess> {
   const cliPath = resolveDevspaceCliPath();
   const baseCommand = {
     executable: process.execPath,
@@ -520,18 +525,29 @@ function defaultSpawnWorker(config: ServerConfig, record: LocalAgentRecord, prom
         allowNetwork: config.sandboxNetwork,
       })
     : baseCommand;
+  // Retrieve Luna credentials before entering the Seatbelt worker. The key travels
+  // only over fd 3; browser/Xcode capabilities are configured inside Luna's own
+  // workspace-scoped MCP configuration and do not require a host-side browser broker.
+  const lunaApiKey = needsLunaCredential(record) ? createLunaSecretStore().read() : "";
   const child = spawn(command.executable, command.args, {
     detached: true,
-    stdio: "ignore",
+    stdio: ["ignore", "ignore", "ignore", "pipe"],
     env: buildSafeChildEnvironment({
       includeProviderCommands: true,
       extra: {
         DEVSPACE_OAUTH_OWNER_TOKEN: "devspace-worker-placeholder-token",
+        DEVSPACE_STATE_DIR: config.stateDir,
       },
     }),
   });
+  const secretPipe = child.stdio[3];
+  if (secretPipe && "end" in secretPipe) secretPipe.end(lunaApiKey);
   child.unref();
   return child;
+}
+
+function needsLunaCredential(record: LocalAgentRecord): boolean {
+  return record.provider === "luna" || record.fallbackEnabled;
 }
 
 function writeAgentPromptFile(prompt: string): string {
@@ -665,7 +681,7 @@ function selectProvider(
     );
   }
 
-  const fallbackProvider = LOCAL_AGENT_PROVIDERS.find((provider) =>
+  const fallbackProvider = fallbackProviderOrder(requested).find((provider) =>
     availability.find((candidate) => candidate.name === provider)?.available,
   );
   if (!fallbackProvider) {
@@ -701,10 +717,15 @@ function selectRuntimeFallbackProvider(
   failedProvider: LocalAgentProvider,
   availability: LocalAgentProviderAvailability[],
 ): LocalAgentProvider | undefined {
-  return LOCAL_AGENT_PROVIDERS.find(
-    (provider) => provider !== failedProvider
-      && availability.find((candidate) => candidate.name === provider)?.available,
+  return fallbackProviderOrder(failedProvider).find(
+    (provider) => availability.find((candidate) => candidate.name === provider)?.available,
   );
+}
+
+function fallbackProviderOrder(requested: LocalAgentProvider): LocalAgentProvider[] {
+  if (requested === "luna") return ["kimi"];
+  if (requested === "kimi") return ["luna"];
+  return ["luna", "kimi"];
 }
 
 function isRecoverableProviderFailure(error: unknown): boolean {
@@ -730,6 +751,10 @@ function isRecoverableProviderFailure(error: unknown): boolean {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function sanitizeWorkerError(error: unknown): string {
+  return errorMessage(error).replace(/\bsk-[A-Za-z0-9_*.=-]+\b/g, "[REDACTED_OPENAI_KEY]");
 }
 
 function hasExceededExecutionTimeout(record: LocalAgentRecord): boolean {

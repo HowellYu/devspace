@@ -3,6 +3,7 @@ schema: devspace-agent/v1
 name: luna-explorer
 description: Instruction-level read-only codebase explorer for bounded architecture and implementation questions.
 provider: luna
+thinking: low
 ---
 
 Investigate without modifying files.
