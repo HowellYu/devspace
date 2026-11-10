@@ -184,6 +184,7 @@ interface ToolLogFields {
   commandLength?: number;
   success: boolean;
   durationMs: number;
+  contentBytes?: number;
   error?: string;
 }
 
@@ -332,6 +333,13 @@ function contentText(content: ToolContent[]): string {
     .join("\n");
 }
 
+function toolContentBytes(content: ToolContent[]): number {
+  return content.reduce(
+    (bytes, item) => bytes + Buffer.byteLength(item.type === "text" ? item.text : item.data, "utf8"),
+    0,
+  );
+}
+
 function toolErrorPreview(content: ToolContent[]): string | undefined {
   const text = contentText(content).replace(/\s+/g, " ").trim();
   if (!text) return undefined;
@@ -348,6 +356,7 @@ function logFailedToolResponse(
     ...fields,
     success: false,
     durationMs: Math.round(performance.now() - startedAt),
+    contentBytes: toolContentBytes(content),
     error: toolErrorPreview(content),
   });
 }
@@ -617,6 +626,7 @@ function registerCodexProcessTools(
         workingDirectory: workingDirectory ?? ".",
         command: cmd,
         commandLength: cmd.length,
+        contentBytes: Buffer.byteLength(processResult(snapshot), "utf8"),
         success: true,
         durationMs: Math.round(performance.now() - startedAt),
       });
@@ -679,6 +689,7 @@ function registerCodexProcessTools(
       logToolCall(config, {
         tool: "write_stdin",
         workspaceId,
+        contentBytes: Buffer.byteLength(processResult(snapshot), "utf8"),
         success: true,
         durationMs: Math.round(performance.now() - startedAt),
       });
@@ -892,6 +903,7 @@ export function createMcpServer(
         tool: "open_workspace",
         workspaceId: workspace.id,
         path: workspace.root,
+        contentBytes: toolContentBytes(resultContent),
         success: true,
         durationMs: Math.round(performance.now() - startedAt),
       });
@@ -1022,6 +1034,7 @@ export function createMcpServer(
         tool: toolNames.read,
         workspaceId,
         path: input.path,
+        contentBytes: toolContentBytes(response.content),
         success: true,
         durationMs: Math.round(performance.now() - startedAt),
       });
@@ -1094,6 +1107,7 @@ export function createMcpServer(
         tool: toolNames.write,
         workspaceId,
         path: input.path,
+        contentBytes: toolContentBytes(response.content),
         success: true,
         durationMs: Math.round(performance.now() - startedAt),
       });
@@ -1183,6 +1197,7 @@ export function createMcpServer(
         tool: toolNames.edit,
         workspaceId,
         path: input.path,
+        contentBytes: toolContentBytes(editContent),
         success: true,
         durationMs: Math.round(performance.now() - startedAt),
       });
@@ -1254,6 +1269,7 @@ export function createMcpServer(
         logToolCall(config, {
           tool: "apply_patch",
           workspaceId,
+          contentBytes: toolContentBytes(content),
           success: true,
           durationMs: Math.round(performance.now() - startedAt),
         });
@@ -1315,6 +1331,7 @@ export function createMcpServer(
         logToolCall(config, {
           tool: "show_changes",
           workspaceId,
+          contentBytes: toolContentBytes(content),
           success: true,
           durationMs: Math.round(performance.now() - startedAt),
         });
@@ -1392,6 +1409,7 @@ export function createMcpServer(
           tool: toolNames.grep,
           workspaceId,
           path: input.path,
+          contentBytes: toolContentBytes(response.content),
           success: true,
           durationMs: Math.round(performance.now() - startedAt),
         });
@@ -1462,6 +1480,7 @@ export function createMcpServer(
           tool: toolNames.glob,
           workspaceId,
           path: input.path,
+          contentBytes: toolContentBytes(response.content),
           success: true,
           durationMs: Math.round(performance.now() - startedAt),
         });
@@ -1528,6 +1547,7 @@ export function createMcpServer(
           tool: toolNames.ls,
           workspaceId,
           path: input.path,
+          contentBytes: toolContentBytes(response.content),
           success: true,
           durationMs: Math.round(performance.now() - startedAt),
         });
@@ -1620,6 +1640,7 @@ export function createMcpServer(
         workingDirectory: workingDirectory ?? ".",
         command: input.command,
         commandLength: input.command.length,
+        contentBytes: toolContentBytes(response.content),
         success: true,
         durationMs: Math.round(performance.now() - startedAt),
       });
