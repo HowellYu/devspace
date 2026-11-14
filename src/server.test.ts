@@ -100,6 +100,20 @@ test("show_changes remains available when visual widgets are off", async (t) => 
   assert.match(responseText(result), /Changed 1 file/);
 });
 
+test("RedNote exposes only the approved read-only status and public-share tools", async (t) => {
+  const context = await fixture(t);
+  const tools = await context.client.listTools();
+  const status = tools.tools.find((tool) => tool.name === "rednote_status");
+  const read = tools.tools.find((tool) => tool.name === "rednote_read");
+
+  assert.ok(status);
+  assert.ok(read);
+  assert.equal(status.annotations?.readOnlyHint, true);
+  assert.equal(read.annotations?.readOnlyHint, true);
+  assert.match(read.description ?? "", /does not search by keyword/i);
+  assert.equal(tools.tools.some((tool) => /rednote.*search|search.*rednote/i.test(tool.name)), false);
+});
+
 test("open_workspace keeps lifecycle flags out of model output and preserves complete card metadata", async (t) => {
   const context = await fixture(t);
   const first = await callOpen(context.client, context.project, "chat-1");

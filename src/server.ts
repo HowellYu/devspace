@@ -53,6 +53,11 @@ import { prefersStatelessMcpTransport } from "./mcp-transport-policy.js";
 import { ProcessSessionManager, type ProcessSnapshot } from "./process-sessions.js";
 import { createReviewCheckpointManager } from "./review-checkpoints.js";
 import {
+  createRednoteBridgeRunner,
+  invokeRednoteBridge,
+  rednoteReadArgs,
+} from "./rednote-bridge.js";
+import {
   createProjectMemoryManager,
   type ProjectMemoryManager,
 } from "./project-memory.js";
@@ -198,6 +203,8 @@ const toolNames = {
   inspectWorker: "inspect_worker",
   continueWorker: "continue_worker",
   stopWorker: "stop_worker",
+  rednoteStatus: "rednote_status",
+  rednoteRead: "rednote_read",
 } as const;
 
 interface ToolLogFields {
@@ -911,6 +918,74 @@ export function createMcpServer(
             },
           },
         ],
+      };
+    },
+  );
+
+  const rednoteBridge = createRednoteBridgeRunner();
+  const rednoteAnnotations = {
+    readOnlyHint: true,
+    destructiveHint: false,
+    idempotentHint: true,
+    openWorldHint: true,
+  };
+
+  registerAppTool(
+    server,
+    toolNames.rednoteStatus,
+    {
+      title: "Check RedNote bridge",
+      description:
+        "Check whether the approved read-only Xiaohongshu/RedNote host bridge is healthy and ready. This never returns account credentials.",
+      inputSchema: {},
+      outputSchema: resultOutputSchema(),
+      _meta: {},
+      annotations: rednoteAnnotations,
+    },
+    async () => {
+      const startedAt = performance.now();
+      const result = await invokeRednoteBridge(rednoteBridge, ["status"]);
+      logToolCall(config, {
+        tool: toolNames.rednoteStatus,
+        success: true,
+        durationMs: Math.round(performance.now() - startedAt),
+      });
+      return {
+        content: [textBlock(result)],
+        structuredContent: { result },
+      };
+    },
+  );
+
+  registerAppTool(
+    server,
+    toolNames.rednoteRead,
+    {
+      title: "Read public RedNote share",
+      description:
+        "Read an explicitly supplied public Xiaohongshu/RedNote share URL or copied share text through the approved read-only host bridge. This does not search by keyword, access account credentials, or download video.",
+      inputSchema: {
+        shareText: z
+          .string()
+          .min(1)
+          .max(4_096)
+          .describe("A public Xiaohongshu/RedNote URL or copied public share text supplied by the user."),
+      },
+      outputSchema: resultOutputSchema(),
+      _meta: {},
+      annotations: rednoteAnnotations,
+    },
+    async ({ shareText }) => {
+      const startedAt = performance.now();
+      const result = await invokeRednoteBridge(rednoteBridge, rednoteReadArgs(shareText));
+      logToolCall(config, {
+        tool: toolNames.rednoteRead,
+        success: true,
+        durationMs: Math.round(performance.now() - startedAt),
+      });
+      return {
+        content: [textBlock(result)],
+        structuredContent: { result },
       };
     },
   );
